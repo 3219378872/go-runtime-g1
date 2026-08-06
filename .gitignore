@@ -1,0 +1,17 @@
+# Generated Go toolchain output.
+toolchain/go-g1-src/bin/
+toolchain/go-g1-src/pkg/
+toolchain/go-greentea-src/
+
+# Generated benchmark binaries, traces, profiles, and summaries.
+bench/bin/
+bench/results/
+
+# Common local coverage output.
+coverage.out
+coverage.html
+
+# Local editor and OS metadata.
+.DS_Store
+.idea/
+.vscode/

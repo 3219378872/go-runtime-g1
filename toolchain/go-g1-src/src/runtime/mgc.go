@@ -237,6 +237,7 @@ var gcphase uint32
 var writeBarrier struct {
 	enabled bool    // compiler emits a check of this before calling write barrier
 	pad     [3]byte // compiler uses 32-bit load for "enabled" field
+	g1Evac  uint32  // compiler checks this before writing G1 slot metadata
 	alignme uint64  // guarantee alignment so that compiler can use a 32 or 64-bit load
 }
 
@@ -765,7 +766,7 @@ func gcStart(trigger gcTrigger) {
 			g1gcCycleStarted = 0
 			g1gcObjectStatsActive = 0
 			g1gcUsedStatsActive = 0
-			g1EvacIndexActive.Store(0)
+			g1gcSetEvacIndexActive(0)
 		}
 	}
 

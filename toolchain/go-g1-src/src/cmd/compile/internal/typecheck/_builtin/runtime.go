@@ -175,7 +175,7 @@ func chancap(hchan any) int
 var writeBarrier struct {
 	enabled bool
 	pad     [3]byte
-	cgo     bool
+	g1Evac  uint32
 	alignme uint64
 }
 

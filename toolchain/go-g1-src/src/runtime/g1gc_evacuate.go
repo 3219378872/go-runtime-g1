@@ -352,7 +352,7 @@ func g1gcEvacuate() {
 	if selectedLiveBytes < minLiveBytes {
 		g1LastEvacSelectNs = nanotime() - selectStart
 		g1LastEvacNanos = nanotime() - evacStart
-		g1EvacIndexActive.Store(0)
+		g1gcSetEvacIndexActive(0)
 		return
 	}
 
@@ -401,7 +401,7 @@ func g1gcEvacuate() {
 	g1LastEvacSelectNs = nanotime() - selectStart
 	if g1EvacDestHead == nil {
 		g1LastEvacNanos = nanotime() - evacStart
-		g1EvacIndexActive.Store(0)
+		g1gcSetEvacIndexActive(0)
 		return
 	}
 
@@ -428,7 +428,7 @@ func g1gcEvacuate() {
 		s.g1evacDest = nil
 	}
 	g1LastEvacNanos = nanotime() - evacStart
-	g1EvacIndexActive.Store(0)
+	g1gcSetEvacIndexActive(0)
 }
 
 func g1gcDebugBits(label string, s *mspan) {

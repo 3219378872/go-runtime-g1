@@ -92,6 +92,26 @@ var g1CandidateSpans [g1CandidateSpanLimit]*mspan
 var g1CandidateCount atomic.Uint64
 var g1CandidateNext atomic.Uint64
 
+// g1gcSetEvacIndexActive publishes the evacuation-index state both to the
+// runtime and to the compiler-generated write-barrier fast path. The latter
+// reads the field in writeBarrier at offset four, after the enabled byte and
+// its padding.
+func g1gcSetEvacIndexActive(value uint32) {
+	g1EvacIndexActive.Store(value)
+	atomic.Store(&writeBarrier.g1Evac, value)
+}
+
+// g1gcResetWBSlots invalidates metadata left in per-P buffers by an earlier
+// evacuation cycle. Buffers may still contain ordinary marking entries when
+// a new cycle publishes the active flag, so stale owners must not be reused.
+func g1gcResetWBSlots() {
+	for _, pp := range allp {
+		if pp != nil {
+			clear(pp.wbBuf.slots[:])
+		}
+	}
+}
+
 func g1gcCycleActive(epoch uint64) bool {
 	if debug.g1trace != 0 || debug.g1gcset != 0 && epoch%g1CollectionSetPeriod == 0 {
 		return true
@@ -118,13 +138,14 @@ func g1gcStartCycle() {
 	traceActive := debug.g1trace != 0
 	setActive := debug.g1gcset != 0 && epoch%g1CollectionSetPeriod == 0
 	evacActive := false
-	g1EvacIndexActive.Store(0)
+	g1gcSetEvacIndexActive(0)
 	if debug.g1evac != 0 {
 		allocNow := gcController.totalAlloc.Load()
 		if allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1EvacuationMinAllocBytes {
 			g1gcResetInbound()
+			g1gcResetWBSlots()
 			evacActive = true
-			g1EvacIndexActive.Store(1)
+			g1gcSetEvacIndexActive(1)
 		}
 	}
 	g1gcObjectStatsActive = uint32(bool2int(traceActive))

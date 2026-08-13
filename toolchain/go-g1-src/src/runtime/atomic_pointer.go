@@ -35,8 +35,10 @@ func atomicwb(ptr *unsafe.Pointer, new unsafe.Pointer) {
 	buf := b.get2()
 	buf[0] = *slot
 	buf[1] = uintptr(new)
-	b.setSlot(uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(slot)))
-	b.setSlot(uintptr(unsafe.Pointer(&buf[1])), uintptr(unsafe.Pointer(slot)))
+	if g1EvacIndexActive.Load() != 0 {
+		b.setSlot(uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(slot)))
+		b.setSlot(uintptr(unsafe.Pointer(&buf[1])), uintptr(unsafe.Pointer(slot)))
+	}
 }
 
 // atomicstorep performs *ptr = new atomically and invokes a write barrier.

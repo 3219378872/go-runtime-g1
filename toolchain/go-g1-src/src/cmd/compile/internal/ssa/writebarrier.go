@@ -171,7 +171,8 @@ func writebarrier(f *Func) {
 	// It must also match the number of instances of runtime.gcWriteBarrier{X}.
 	const maxEntries = 8
 	// wbBufSlotsOffset is the distance from wbBuf.buf to the parallel slot
-	// metadata array in runtime/mwbbuf.go. Keep it in sync with wbBufEntries.
+	// metadata array in runtime/mwbbuf.go, in pointer-sized entries. Keep it
+	// in sync with wbBufEntries.
 	const wbBufEntries = 512
 
 	var sb, sp, wbaddr, const0 *Value
@@ -375,7 +376,6 @@ func writebarrier(f *Func) {
 		b.Succs = b.Succs[:0]
 		b.AddEdgeTo(bThen)
 		b.AddEdgeTo(bEnd)
-		bThen.AddEdgeTo(bEnd)
 
 		// For each write barrier store, append write barrier code to bThen.
 		memThen := mem
@@ -401,8 +401,15 @@ func writebarrier(f *Func) {
 			slot *Value   // owner slot for the value
 			pos  src.XPos // location to use for the write
 		}
+		type slotWrite struct {
+			base *Value
+			slot *Value
+			pos  src.XPos
+			off  int64
+		}
 		var writeStore [maxEntries]write
 		writes := writeStore[:0]
+		var slotWrites []slotWrite
 
 		flush := func() {
 			if len(writes) == 0 {
@@ -413,13 +420,11 @@ func writebarrier(f *Func) {
 			call := bThen.NewValue1I(pos, OpWB, t, int64(len(writes)), memThen)
 			curPtr := bThen.NewValue1(pos, OpSelect0, types.Types[types.TUINTPTR].PtrTo(), call)
 			memThen = bThen.NewValue1(pos, OpSelect1, types.TypeMem, call)
-			slotPtr := bThen.NewValue1I(pos, OpOffPtr, types.Types[types.TUINTPTR].PtrTo(), int64(wbBufEntries)*f.Config.PtrSize, curPtr)
 			// Write each pending pointer to a slot in the buffer.
 			for i, write := range writes {
 				wbuf := bThen.NewValue1I(write.pos, OpOffPtr, types.Types[types.TUINTPTR].PtrTo(), int64(i)*f.Config.PtrSize, curPtr)
 				memThen = bThen.NewValue3A(write.pos, OpStore, types.TypeMem, types.Types[types.TUINTPTR], wbuf, write.ptr, memThen)
-				sbuf := bThen.NewValue1I(write.pos, OpOffPtr, types.Types[types.TUINTPTR].PtrTo(), int64(i)*f.Config.PtrSize, slotPtr)
-				memThen = bThen.NewValue3A(write.pos, OpStore, types.TypeMem, types.Types[types.TUINTPTR], sbuf, write.slot, memThen)
+				slotWrites = append(slotWrites, slotWrite{base: curPtr, slot: write.slot, pos: write.pos.WithNotStmt(), off: int64(i) * f.Config.PtrSize})
 			}
 			writes = writes[:0]
 		}
@@ -460,6 +465,47 @@ func writebarrier(f *Func) {
 			nWBops--
 		}
 		flush()
+
+		// Slot metadata is only consumed by evacuation cycles. Keep the
+		// ordinary marking path to one buffer store per barrier entry, and
+		// branch around the parallel metadata stores as a single batch.
+		if len(slotWrites) != 0 {
+			bCheck := f.NewBlock(BlockIf)
+			bSlots := f.NewBlock(BlockPlain)
+			bContinue := f.NewBlock(BlockPlain)
+			internalPos := pos.WithNotStmt()
+			bCheck.Pos = internalPos
+			bSlots.Pos = internalPos
+			bContinue.Pos = bEnd.Pos.WithNotStmt()
+
+			bThen.AddEdgeTo(bCheck)
+			bCheck.AddEdgeTo(bSlots)
+			bCheck.AddEdgeTo(bContinue)
+			bSlots.AddEdgeTo(bContinue)
+
+			g1FlagAddr := bCheck.NewValue1I(internalPos, OpOffPtr, cfgtypes.UInt32Ptr, 4, wbaddr)
+			g1Flag := bCheck.NewValue2(internalPos, OpLoad, cfgtypes.UInt32, g1FlagAddr, memThen)
+			g1Flag = bCheck.NewValue2(internalPos, OpNeq32, cfgtypes.Bool, g1Flag, const0)
+			bCheck.SetControl(g1Flag)
+			bCheck.Likely = BranchUnlikely
+
+			memSlots := memThen
+			slotBases := make(map[*Value]*Value)
+			for _, write := range slotWrites {
+				slotBase := slotBases[write.base]
+				if slotBase == nil {
+					slotBase = bSlots.NewValue1I(write.pos, OpOffPtr, types.Types[types.TUINTPTR].PtrTo(), int64(wbBufEntries)*f.Config.PtrSize, write.base)
+					slotBases[write.base] = slotBase
+				}
+				sbuf := bSlots.NewValue1I(write.pos, OpOffPtr, types.Types[types.TUINTPTR].PtrTo(), write.off, slotBase)
+				memSlots = bSlots.NewValue3A(write.pos, OpStore, types.TypeMem, types.Types[types.TUINTPTR], sbuf, write.slot, memSlots)
+			}
+			memThen = bContinue.NewValue2(internalPos, OpPhi, types.TypeMem, memThen, memSlots)
+			bThen = bContinue
+			bThen.AddEdgeTo(bEnd)
+		} else {
+			bThen.AddEdgeTo(bEnd)
+		}
 
 		// Now do the rare cases, Zeros and Moves.
 		for _, w := range stores {

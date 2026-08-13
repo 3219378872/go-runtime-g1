@@ -1,7 +1,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 bootstrap_root := env_var_or_default("GOROOT_BOOTSTRAP", "/usr/local/go")
-candidate_root := env_var_or_default("CANDIDATE_ROOT", "toolchain/go-g1-src")
+candidate_root := env_var_or_default("CANDIDATE_ROOT", "toolchain/go-g1-1261-src")
 candidate_go := candidate_root + "/bin/go"
 g1gc_godebug := env_var_or_default("GODEBUG_VALUE", env_var_or_default("G1GC_GODEBUG", "gctrace=1,g1gc=1"))
 g1gcset_godebug := env_var_or_default("GODEBUG_VALUE", env_var_or_default("G1GCSET_GODEBUG", "gctrace=1,g1gc=1,g1gcset=1"))

@@ -15,7 +15,7 @@ summary_label := env_var_or_default("LABEL", "collection-set")
 smoke_duration := env_var_or_default("SMOKE_DURATION", "1s")
 
 project_go_files := "collect.go g1gc_test.go heap.go mark.go policy.go region.go types.go validate.go cmd/g1gc-demo/main.go bench/compare/main.go bench/workload/main.go"
-fork_go_files := "toolchain/go-g1-src/src/runtime/mheap.go toolchain/go-g1-src/src/runtime/mgcmark.go toolchain/go-g1-src/src/runtime/mwbbuf.go toolchain/go-g1-src/src/runtime/mbitmap.go toolchain/go-g1-src/src/runtime/atomic_pointer.go toolchain/go-g1-src/src/runtime/g1gc_evacuate.go toolchain/go-g1-src/src/cmd/compile/internal/ssa/writebarrier.go"
+fork_go_files := "toolchain/go-g1-1261-src/src/runtime/mheap.go toolchain/go-g1-1261-src/src/runtime/mgcmark.go toolchain/go-g1-1261-src/src/runtime/mgcmark_greenteagc.go toolchain/go-g1-1261-src/src/runtime/mwbbuf.go toolchain/go-g1-1261-src/src/runtime/mbitmap.go toolchain/go-g1-1261-src/src/runtime/atomic_pointer.go toolchain/go-g1-1261-src/src/runtime/g1gc.go toolchain/go-g1-1261-src/src/runtime/g1gc_evacuate.go toolchain/go-g1-1261-src/src/cmd/compile/internal/ssa/writebarrier.go toolchain/go-g1-1261-src/src/cmd/compile/internal/liveness/plive.go"
 
 default: verify
 

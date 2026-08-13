@@ -27,7 +27,7 @@ const (
 // live-region policy every time, but moving objects only when enough elapsed
 // allocation has accumulated keeps the experimental stop-the-world path from
 // turning every small GC into a global rewrite.
-const g1EvacuationMinAllocBytes = 1 << 30
+const g1EvacuationMinAllocBytes = 2 << 30
 
 // g1EvacRegionEpoch is a conservative address filter for pointer rewriting.
 // It is reset logically by the epoch rather than by clearing the table.
@@ -465,14 +465,35 @@ func g1gcDebugBits(label string, s *mspan) {
 	print("\\n")
 }
 
+// g1gcHasSpanSpecials reports whether any heap span has specials (finalizers,
+// weak handles, or pinner bits). The span-root markroot shards only do work
+// when this bitmap is non-empty, so evacuation can skip the whole span-root
+// pass when it is empty.
+func g1gcHasSpanSpecials() bool {
+	for _, ai := range mheap_.markArenas {
+		ha := mheap_.arenas[ai.l1()][ai.l2()]
+		for i := range ha.pageSpecials {
+			if atomic.Load8(&ha.pageSpecials[i]) != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func g1gcUpdateRoots() {
 	gcw := &getg().m.p.ptr().gcw
 	rootStart := nanotime()
-	for i := uint32(0); i < work.baseStacks; i++ {
+	for i := uint32(0); i < work.baseSpans; i++ {
 		if i == fixedRootFreeGStacks {
 			continue
 		}
 		markroot(gcw, i, false)
+	}
+	if g1gcHasSpanSpecials() {
+		for i := work.baseSpans; i < work.baseStacks; i++ {
+			markroot(gcw, i, false)
+		}
 	}
 	g1LastEvacRootsMarkNs = nanotime() - rootStart
 	stackStart := nanotime()

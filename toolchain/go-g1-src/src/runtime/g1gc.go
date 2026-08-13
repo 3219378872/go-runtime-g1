@@ -69,7 +69,7 @@ type g1InboundRegion struct {
 // g1EdgeBufSize is the per-P dedup table size for inbound edges. Each P
 // records at most one (owner span, target region) pair per cycle here; if the
 // table fills, the conservative full-heap rewrite fallback is armed instead.
-const g1EdgeBufSize = 4096
+const g1EdgeBufSize = 512
 
 // g1EdgeEntry is one deduplicated inbound edge slot. owner is stored as a
 // uintptr so the concurrent marking paths (including the write barrier flush,

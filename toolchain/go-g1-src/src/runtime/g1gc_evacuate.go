@@ -27,7 +27,7 @@ const (
 // live-region policy every time, but moving objects only when enough elapsed
 // allocation has accumulated keeps the experimental stop-the-world path from
 // turning every small GC into a global rewrite.
-const g1EvacuationMinAllocBytes = 512 << 20
+const g1EvacuationMinAllocBytes = 1 << 30
 
 // g1EvacRegionEpoch is a conservative address filter for pointer rewriting.
 // It is reset logically by the epoch rather than by clearing the table.

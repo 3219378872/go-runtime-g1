@@ -51,6 +51,13 @@ var g1UsedCount atomic.Uint64
 var g1UsedInitialized atomic.Uint32
 var g1RegionSpans [g1RegionCount]*mspan
 
+// g1LowLiveRegions lists the used regions whose live bytes are below half of
+// their used bytes. Evacuation can only select spans from these regions, so
+// the list lets selection walk region span lists instead of all of allspans.
+// It is rebuilt at mark termination while the world is stopped.
+var g1LowLiveRegions [g1RegionCount]uintptr
+var g1LowLiveCount uint64
+
 type g1InboundRegion struct {
 	head   atomic.Uint32
 	listed atomic.Uint32
@@ -325,6 +332,7 @@ func g1gcLinkSpan(span *mspan) {
 // g1gcInitializeUsed rebuilds region state from authoritative span allocation
 // and mark bits at mark termination.
 func g1gcInitializeUsed() {
+	g1LowLiveCount = 0
 	previousUsedCount := g1UsedCount.Load()
 	for i := uint64(0); i < previousUsedCount; i++ {
 		index := g1UsedRegions[i]
@@ -378,6 +386,21 @@ func g1gcInitializeUsed() {
 		}
 	}
 	g1UsedInitialized.Store(1)
+	if g1EvacIndexActive.Load() != 0 {
+		count := uint64(0)
+		for i := uint64(0); i < g1UsedCount.Load(); i++ {
+			index := g1UsedRegions[i]
+			region := &g1Regions[index]
+			used := region.usedBytes.Load()
+			live := region.liveBytes.Load()
+			if used == 0 || live*2 >= used {
+				continue
+			}
+			g1LowLiveRegions[count] = index
+			count++
+		}
+		g1LowLiveCount = count
+	}
 }
 
 func g1gcSnapshotUsed() {

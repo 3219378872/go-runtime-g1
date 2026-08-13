@@ -336,18 +336,19 @@ func g1gcEvacuate() {
 	// performs the existing copy with the same deterministic eligibility walk.
 	remaining := uint64(g1EvacuationMaxBytes)
 	var selectedLiveBytes uint64
-	for i := 0; i < len(allspans) && remaining != 0; i++ {
-		s := allspans[i]
-		_, liveBytes, ok := g1gcEvacEligible(s, epoch)
-		if !ok {
-			continue
+	for i := uint64(0); i < g1LowLiveCount && remaining != 0; i++ {
+		for s := g1RegionSpans[g1LowLiveRegions[i]]; s != nil; s = s.g1next {
+			_, liveBytes, ok := g1gcEvacEligible(s, epoch)
+			if !ok {
+				continue
+			}
+			spanBytes := uint64(s.npages) * uint64(pageSize)
+			if spanBytes > remaining {
+				continue
+			}
+			selectedLiveBytes += liveBytes
+			remaining -= spanBytes
 		}
-		spanBytes := uint64(s.npages) * uint64(pageSize)
-		if spanBytes > remaining {
-			continue
-		}
-		selectedLiveBytes += liveBytes
-		remaining -= spanBytes
 	}
 	if selectedLiveBytes < minLiveBytes {
 		g1LastEvacSelectNs = nanotime() - selectStart
@@ -357,46 +358,47 @@ func g1gcEvacuate() {
 	}
 
 	remaining = uint64(g1EvacuationMaxBytes)
-	for i := 0; i < len(allspans) && remaining != 0; i++ {
-		s := allspans[i]
-		liveObjects, _, ok := g1gcEvacEligible(s, epoch)
-		if !ok {
-			continue
+	for i := uint64(0); i < g1LowLiveCount && remaining != 0; i++ {
+		for s := g1RegionSpans[g1LowLiveRegions[i]]; s != nil; s = s.g1next {
+			liveObjects, _, ok := g1gcEvacEligible(s, epoch)
+			if !ok {
+				continue
+			}
+			spanBytes := uint64(s.npages) * uint64(pageSize)
+			if spanBytes > remaining {
+				continue
+			}
+			dst := g1gcAllocEvacDestination(s)
+			if dst == nil {
+				continue
+			}
+			if debug.g1evac > 1 {
+				print("g1evac source base=", hex(s.base()), " span=", s, " elemsize=", s.elemsize, " nelems=", s.nelems, " alloc=", s.allocCount, " live=", liveObjects, " sweepgen=", s.sweepgen, "\\n")
+			}
+			copyStart := nanotime()
+			g1gcCopyEvacuatedSpan(s, dst, liveObjects)
+			g1LastEvacCopyNs += nanotime() - copyStart
+			if dst.elemsize == 256 {
+				g1DebugLastDestination = dst
+			}
+			if debug.g1evac > 1 {
+				print("g1evac dest base=", hex(dst.base()), " span=", dst, " elemsize=", dst.elemsize, " nelems=", dst.nelems, " alloc=", dst.allocCount, " freeindex=", dst.freeindex, " sweepgen=", dst.sweepgen, "\\n")
+			}
+			atomic.Store(&dst.sweepgen, mheap_.sweepgen+1)
+			s.g1evacDest = dst
+			if liveObjects > uint64(^uint16(0)) {
+				throw("runtime: G1 evacuation live object count overflow")
+			}
+			s.g1evacLiveObjects = uint16(liveObjects)
+			g1gcMarkEvacuatedRegions(s, epoch)
+			dst.g1evacNext = g1EvacDestHead
+			g1EvacDestHead = dst
+			g1gcRecordSpanAllocation(dst, liveObjects)
+			g1LastEvacSpans++
+			g1LastEvacObjects += liveObjects
+			g1LastEvacBytes += uint64(liveObjects) * uint64(s.elemsize)
+			remaining -= spanBytes
 		}
-		spanBytes := uint64(s.npages) * uint64(pageSize)
-		if spanBytes > remaining {
-			continue
-		}
-		dst := g1gcAllocEvacDestination(s)
-		if dst == nil {
-			continue
-		}
-		if debug.g1evac > 1 {
-			print("g1evac source base=", hex(s.base()), " span=", s, " elemsize=", s.elemsize, " nelems=", s.nelems, " alloc=", s.allocCount, " live=", liveObjects, " sweepgen=", s.sweepgen, "\\n")
-		}
-		copyStart := nanotime()
-		g1gcCopyEvacuatedSpan(s, dst, liveObjects)
-		g1LastEvacCopyNs += nanotime() - copyStart
-		if dst.elemsize == 256 {
-			g1DebugLastDestination = dst
-		}
-		if debug.g1evac > 1 {
-			print("g1evac dest base=", hex(dst.base()), " span=", dst, " elemsize=", dst.elemsize, " nelems=", dst.nelems, " alloc=", dst.allocCount, " freeindex=", dst.freeindex, " sweepgen=", dst.sweepgen, "\\n")
-		}
-		atomic.Store(&dst.sweepgen, mheap_.sweepgen+1)
-		s.g1evacDest = dst
-		if liveObjects > uint64(^uint16(0)) {
-			throw("runtime: G1 evacuation live object count overflow")
-		}
-		s.g1evacLiveObjects = uint16(liveObjects)
-		g1gcMarkEvacuatedRegions(s, epoch)
-		dst.g1evacNext = g1EvacDestHead
-		g1EvacDestHead = dst
-		g1gcRecordSpanAllocation(dst, liveObjects)
-		g1LastEvacSpans++
-		g1LastEvacObjects += liveObjects
-		g1LastEvacBytes += uint64(liveObjects) * uint64(s.elemsize)
-		remaining -= spanBytes
 	}
 	g1LastEvacSelectNs = nanotime() - selectStart
 	if g1EvacDestHead == nil {

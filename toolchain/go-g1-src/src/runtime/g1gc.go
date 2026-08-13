@@ -5,7 +5,10 @@
 // has been proven against the runtime's precise pointer maps.
 package runtime
 
-import "internal/runtime/atomic"
+import (
+	"internal/runtime/atomic"
+	"unsafe"
+)
 
 const (
 	g1RegionShift = 20 // 1 MiB logical regions, matching the initial G1 policy.
@@ -63,6 +66,19 @@ type g1InboundRegion struct {
 	listed atomic.Uint32
 }
 
+// g1EdgeBufSize is the per-P dedup table size for inbound edges. Each P
+// records at most one (owner span, target region) pair per cycle here; if the
+// table fills, the conservative full-heap rewrite fallback is armed instead.
+const g1EdgeBufSize = 4096
+
+// g1EdgeEntry is one deduplicated inbound edge slot. owner is stored as a
+// uintptr so the concurrent marking paths (including the write barrier flush,
+// which forbids write barriers) can publish it without barriers.
+type g1EdgeEntry struct {
+	owner  uintptr
+	region uintptr
+}
+
 type g1InboundSpanEdge struct {
 	owner *mspan
 	next  uint32
@@ -76,6 +92,9 @@ var g1InboundTouched [g1RegionCount]uintptr
 var g1InboundTouchedCount atomic.Uint64
 var g1InboundSpanEdges [g1InboundSpanLimit]g1InboundSpanEdge
 var g1InboundSpanCount atomic.Uint64
+
+// Diagnostic accumulation of per-cycle time spent in inbound recording.
+var g1EvacRecordNs atomic.Int64
 var g1InboundOverflow atomic.Uint32
 
 var g1LastCycle struct {
@@ -115,6 +134,9 @@ func g1gcResetWBSlots() {
 	for _, pp := range allp {
 		if pp != nil {
 			clear(pp.wbBuf.slots[:])
+			for i := range pp.g1Edges {
+				pp.g1Edges[i] = g1EdgeEntry{}
+			}
 		}
 	}
 }
@@ -192,6 +214,7 @@ func g1gcResetInbound() {
 	g1InboundTouchedCount.Store(0)
 	g1InboundSpanCount.Store(0)
 	g1InboundOverflow.Store(0)
+	g1EvacRecordNs.Store(0)
 }
 
 // g1gcAppendInbound publishes one heap owner span for a pointer into a target
@@ -206,32 +229,71 @@ func g1gcAppendInbound(owner *mspan, targetRegion uintptr) {
 	g1gcAppendInboundActive(owner, targetRegion)
 }
 
-// g1gcAppendInboundActive is the append path after the caller has established
-// that the current mark cycle is evacuation-eligible. Keeping the configuration
-// and active-cycle checks out of the per-edge path matters for dense graphs.
+// g1gcAppendInboundActive is the per-edge body after the caller has
+// established that the current mark cycle is evacuation-eligible. Edges are
+// deduplicated per P in a small open-addressing table and flushed into the
+// global inbound tables at the evacuation STW, so the hot path performs no
+// global atomics.
 //
 //go:nosplit
 func g1gcAppendInboundActive(owner *mspan, targetRegion uintptr) {
-	region := &g1InboundRegions[targetRegion&(g1RegionCount-1)]
-	if region.listed.CompareAndSwap(0, 1) {
-		position := g1InboundTouchedCount.Add(1) - 1
-		if position >= g1RegionCount {
-			throw("runtime: G1 inbound-region index overflow")
-		}
-		g1InboundTouched[position] = targetRegion & (g1RegionCount - 1)
-	}
-	position := g1InboundSpanCount.Add(1) - 1
-	if position >= g1InboundSpanLimit {
-		g1InboundOverflow.Store(1)
-		return
-	}
-	edge := &g1InboundSpanEdges[position]
-	edge.owner = owner
-	for {
-		head := region.head.Load()
-		edge.next = head
-		if region.head.CompareAndSwap(head, uint32(position+1)) {
+	pp := getg().m.p.ptr()
+	h := uintptr(unsafe.Pointer(owner))>>4 ^ targetRegion
+	h ^= h >> 16
+	h *= 0x7feb352d
+	h ^= h >> 15
+	h &= g1EdgeBufSize - 1
+	for i := uintptr(0); i < g1EdgeBufSize; i++ {
+		e := &pp.g1Edges[(h+i)&(g1EdgeBufSize-1)]
+		if e.owner == uintptr(unsafe.Pointer(owner)) && e.region == targetRegion {
 			return
+		}
+		if e.owner == 0 {
+			e.owner = uintptr(unsafe.Pointer(owner))
+			e.region = targetRegion
+			return
+		}
+	}
+	g1InboundOverflow.Store(1)
+}
+
+// g1gcFlushInboundEdges merges the per-P dedup tables into the global inbound
+// tables. The world is stopped, so the global appends use the same lock-free
+// region chains as the original per-edge path without concurrent competitors.
+func g1gcFlushInboundEdges() {
+	for _, pp := range allp {
+		if pp == nil {
+			continue
+		}
+		for i := range pp.g1Edges {
+			e := &pp.g1Edges[i]
+			if e.owner == 0 {
+				continue
+			}
+			owner := (*mspan)(unsafe.Pointer(e.owner))
+			targetRegion := e.region
+			region := &g1InboundRegions[targetRegion&(g1RegionCount-1)]
+			if region.listed.CompareAndSwap(0, 1) {
+				position := g1InboundTouchedCount.Add(1) - 1
+				if position >= g1RegionCount {
+					throw("runtime: G1 inbound-region index overflow")
+				}
+				g1InboundTouched[position] = targetRegion & (g1RegionCount - 1)
+			}
+			position := g1InboundSpanCount.Add(1) - 1
+			if position >= g1InboundSpanLimit {
+				g1InboundOverflow.Store(1)
+				return
+			}
+			edge := &g1InboundSpanEdges[position]
+			edge.owner = owner
+			for {
+				head := region.head.Load()
+				edge.next = head
+				if region.head.CompareAndSwap(head, uint32(position+1)) {
+					break
+				}
+			}
 		}
 	}
 }
@@ -332,6 +394,7 @@ func g1gcLinkSpan(span *mspan) {
 // g1gcInitializeUsed rebuilds region state from authoritative span allocation
 // and mark bits at mark termination.
 func g1gcInitializeUsed() {
+	initStart := nanotime()
 	g1LowLiveCount = 0
 	previousUsedCount := g1UsedCount.Load()
 	for i := uint64(0); i < previousUsedCount; i++ {
@@ -387,6 +450,7 @@ func g1gcInitializeUsed() {
 	}
 	g1UsedInitialized.Store(1)
 	if g1EvacIndexActive.Load() != 0 {
+		g1LastEvacInitNs = nanotime() - initStart
 		count := uint64(0)
 		for i := uint64(0); i < g1UsedCount.Load(); i++ {
 			index := g1UsedRegions[i]
@@ -570,11 +634,16 @@ func g1gcTrace() {
 		" evac-select-us ", g1LastEvacSelectNs/1e3,
 		" evac-copy-us ", g1LastEvacCopyNs/1e3,
 		" evac-roots-us ", g1LastEvacRootsNs/1e3,
+		" evac-rootsmark-us ", g1LastEvacRootsMarkNs/1e3,
+		" evac-rootsstack-us ", g1LastEvacRootsStackNs/1e3,
+		" evac-init-us ", g1LastEvacInitNs/1e3,
+		" evac-final-us ", g1LastEvacFinalNs/1e3,
 		" evac-heap-us ", g1LastEvacHeapNs/1e3,
 		" evac-spans ", g1LastEvacSpans,
 		" evac-objects ", g1LastEvacObjects,
 		" evac-bytes ", g1LastEvacBytes,
 		" rewrite-spans ", g1LastRewriteSpans,
 		" inbound-edges ", g1InboundSpanCount.Load(),
+		" inbound-record-us ", g1EvacRecordNs.Load()/1e3,
 		" inbound-overflow ", g1InboundOverflow.Load())
 }

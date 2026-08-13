@@ -41,15 +41,19 @@ var g1EvacLastAlloc uint64
 // The phase timings are diagnostic data emitted with gctrace. They are plain
 // fields because evacuation and trace emission are both stop-the-world.
 var (
-	g1LastEvacNanos    int64
-	g1LastEvacSelectNs int64
-	g1LastEvacCopyNs   int64
-	g1LastEvacRootsNs  int64
-	g1LastEvacHeapNs   int64
-	g1LastEvacSpans    uint64
-	g1LastEvacObjects  uint64
-	g1LastEvacBytes    uint64
-	g1LastRewriteSpans uint64
+	g1LastEvacNanos        int64
+	g1LastEvacSelectNs     int64
+	g1LastEvacCopyNs       int64
+	g1LastEvacRootsNs      int64
+	g1LastEvacRootsMarkNs  int64
+	g1LastEvacRootsStackNs int64
+	g1LastEvacHeapNs       int64
+	g1LastEvacInitNs       int64
+	g1LastEvacFinalNs      int64
+	g1LastEvacSpans        uint64
+	g1LastEvacObjects      uint64
+	g1LastEvacBytes        uint64
+	g1LastRewriteSpans     uint64
 )
 
 // g1gcRewriteActive is only enabled while the world is stopped. The marking
@@ -291,7 +295,11 @@ func g1gcEvacuate() {
 	g1LastEvacSelectNs = 0
 	g1LastEvacCopyNs = 0
 	g1LastEvacRootsNs = 0
+	g1LastEvacRootsMarkNs = 0
+	g1LastEvacRootsStackNs = 0
 	g1LastEvacHeapNs = 0
+	g1LastEvacInitNs = 0
+	g1LastEvacFinalNs = 0
 	g1LastEvacSpans = 0
 	g1LastEvacObjects = 0
 	g1LastEvacBytes = 0
@@ -407,6 +415,7 @@ func g1gcEvacuate() {
 		return
 	}
 
+	g1gcFlushInboundEdges()
 	g1gcDebugUserArenaState("before-rewrite")
 	g1gcRewriteActive = 1
 	rootStart := nanotime()
@@ -458,15 +467,19 @@ func g1gcDebugBits(label string, s *mspan) {
 
 func g1gcUpdateRoots() {
 	gcw := &getg().m.p.ptr().gcw
+	rootStart := nanotime()
 	for i := uint32(0); i < work.baseStacks; i++ {
 		if i == fixedRootFreeGStacks {
 			continue
 		}
 		markroot(gcw, i, false)
 	}
+	g1LastEvacRootsMarkNs = nanotime() - rootStart
+	stackStart := nanotime()
 	for _, gp := range allGsSnapshot() {
 		g1gcRewriteStack(gp, gcw)
 	}
+	g1LastEvacRootsStackNs = nanotime() - stackStart
 }
 
 func g1gcRewriteStack(gp *g, gcw *gcWork) {
@@ -641,6 +654,7 @@ func g1gcClearSourceBits(s *mspan) {
 
 func g1gcFinalizeEvacuation() {
 	assertWorldStopped()
+	finalStart := nanotime()
 	for s := g1EvacDestHead; s != nil; {
 		next := s.g1evacNext
 		s.g1evacNext = nil
@@ -654,6 +668,7 @@ func g1gcFinalizeEvacuation() {
 		s = next
 	}
 	g1EvacDestHead = nil
+	g1LastEvacFinalNs = nanotime() - finalStart
 }
 
 // Keep the architecture import tied to this file's pointer-slot contract.

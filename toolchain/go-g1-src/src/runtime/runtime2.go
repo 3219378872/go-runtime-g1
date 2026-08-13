@@ -728,6 +728,11 @@ type p struct {
 	// TODO: Consider caching this in the running G.
 	wbBuf wbBuf
 
+	// g1Edges is this P's G1 inbound-edge dedup table. It is populated
+	// during evacuation-eligible mark cycles and flushed to the global
+	// inbound tables at the evacuation STW.
+	g1Edges [g1EdgeBufSize]g1EdgeEntry
+
 	runSafePointFn uint32 // if 1, run sched.safePointFn at next safe point
 
 	// statsSeq is a counter indicating whether this P is currently

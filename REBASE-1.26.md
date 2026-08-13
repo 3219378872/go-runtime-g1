@@ -20,12 +20,16 @@ Key 1.26 facts learned during the port:
   per-build helpers (g1gcCountInlineMarks, g1gcClearInlineMarks).
 - scanObjectSmall/scanObjectsSmall are the span-batched scan paths and
   need the same inbound recording as scanObject.
-- Compiler slot metadata: the gated CFG variant (bCheck/bSlots/bContinue
-  on writeBarrier.g1Evac) cost ~3% throughput on 1.26 codegen; the
-  final port writes slot metadata unconditionally in the flush batch
-  (no extra branch) and gates only the runtime-side processing.
+- Compiler slot metadata: gated (bCheck/bSlots/bContinue on
+  writeBarrier.g1Evac) vs unconditional stores were A/B-tested in the
+  same window; stalls are identical and gated is marginally better on
+  throughput, so the gated variant is kept.
 - g1Edges sits at the END of the p struct (after wbBuf) to avoid
   shifting hot fields' cache layout.
+- The remaining mark-term stall excess (~3x official events of
+  100-200us per run) is structural (present with g1gc=0 and with the
+  vanilla compiler) and was not isolated between the wbBuf slots array,
+  mspan fields, and p-struct footprint; absolute impact is small.
 
 Remaining measured gap vs official go1.26.1 (pointer64): mark-term p99
 ~100us vs ~65us, dominated by candidate-specific non-evac mark-term

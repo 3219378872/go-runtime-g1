@@ -130,7 +130,7 @@ var g1CandidateNext atomic.Uint64
 // reads the field in writeBarrier at offset four, after the enabled byte and
 // its padding.
 func g1gcSetEvacIndexActive(value uint32) {
-	g1EvacIndexActive.Store(value)
+	atomic.Store(&g1EvacIndexActive, value)
 	atomic.Store(&writeBarrier.g1Evac, value)
 }
 
@@ -202,9 +202,11 @@ var g1gcObjectStatsActive uint32
 var g1gcUsedStatsActive uint32
 
 // g1EvacIndexActive is published at cycle start. Inbound edges are only
-// useful in a cycle that is eligible to evacuate, so most mark cycles can skip
-// the per-pointer reverse-index work entirely.
-var g1EvacIndexActive atomic.Uint32
+// recorded while the flag is set, and the evacuation rewrite consumes them
+// at mark termination. It is written only while the world is stopped and
+// read during concurrent marking, so the STW barriers make plain reads
+// correct (same protocol as gcphase).
+var g1EvacIndexActive uint32
 
 // g1gcCycleStarted is set only while the world is stopped. It records that
 // the current GC passed g1gcCycleActive at start; the allocation counter may
@@ -233,7 +235,7 @@ func g1gcResetInbound() {
 //
 //go:nosplit
 func g1gcAppendInbound(owner *mspan, targetRegion uintptr) {
-	if owner == nil || debug.g1gc == 0 || debug.g1evac == 0 || g1EvacIndexActive.Load() == 0 {
+	if owner == nil || debug.g1gc == 0 || debug.g1evac == 0 || g1EvacIndexActive == 0 {
 		return
 	}
 	g1gcAppendInboundActive(owner, targetRegion)
@@ -317,7 +319,7 @@ func g1gcFlushInboundEdges() {
 //
 //go:nosplit
 func g1gcRecordInbound(gcw *gcWork, owner, target *mspan, pointer uintptr) {
-	if owner == nil || target == nil || debug.g1gc == 0 || debug.g1evac == 0 || g1EvacIndexActive.Load() == 0 {
+	if owner == nil || target == nil || debug.g1gc == 0 || debug.g1evac == 0 || g1EvacIndexActive == 0 {
 		return
 	}
 	g1gcRecordInboundActive(gcw, owner, target, pointer)
@@ -342,7 +344,7 @@ func g1gcRecordInboundActive(gcw *gcWork, owner, target *mspan, pointer uintptr)
 //
 //go:nosplit
 func g1gcRecordInboundSlot(slot, pointer uintptr) {
-	if debug.g1gc == 0 || debug.g1evac == 0 || g1EvacIndexActive.Load() == 0 || slot == 0 || pointer == 0 {
+	if debug.g1gc == 0 || debug.g1evac == 0 || g1EvacIndexActive == 0 || slot == 0 || pointer == 0 {
 		return
 	}
 	g1gcRecordInboundSlotActive(&getg().m.p.ptr().gcw, slot, pointer)
@@ -423,7 +425,7 @@ func g1gcInitializeUsed() {
 	}
 	g1UsedCount.Store(0)
 	epoch := uint64(work.cycles.Load())
-	spanIndexActive := g1EvacIndexActive.Load() != 0 || debug.g1gcset != 0 && epoch%g1CollectionSetPeriod == 0
+	spanIndexActive := g1EvacIndexActive != 0 || debug.g1gcset != 0 && epoch%g1CollectionSetPeriod == 0
 	for _, span := range mheap_.allspans {
 		if span == nil {
 			continue
@@ -463,7 +465,7 @@ func g1gcInitializeUsed() {
 		}
 	}
 	g1UsedInitialized.Store(1)
-	if g1EvacIndexActive.Load() != 0 {
+	if g1EvacIndexActive != 0 {
 		g1LastEvacInitNs = nanotime() - initStart
 		count := uint64(0)
 		for i := uint64(0); i < g1UsedCount.Load(); i++ {

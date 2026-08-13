@@ -231,13 +231,13 @@ func scanObject(b uintptr, gcw *gcWork) {
 			if tryDeferToSpanScan(obj, gcw) {
 				// Green Tea may defer the object to a span queue, so resolve
 				// its owner span here before the pointer leaves this scan.
-				if g1EvacIndexActive.Load() != 0 {
+				if g1EvacIndexActive != 0 {
 					if target := spanOfHeap(obj); target != nil {
 						g1gcRecordInboundActive(gcw, s, target, obj)
 					}
 				}
 			} else if obj, span, objIndex := findObject(obj, b, addr-b); obj != 0 {
-				if g1EvacIndexActive.Load() != 0 {
+				if g1EvacIndexActive != 0 {
 					g1gcRecordInboundActive(gcw, s, span, obj)
 				}
 				greyobject(obj, b, addr-b, span, gcw, objIndex)

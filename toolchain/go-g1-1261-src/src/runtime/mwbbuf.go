@@ -222,7 +222,7 @@ func wbBufFlush1(pp *p) {
 
 	gcw := &pp.gcw
 	ptrSlots := pp.wbBuf.slots[:n]
-	if g1EvacIndexActive.Load() != 0 {
+	if g1EvacIndexActive != 0 {
 		for i, ptr := range ptrs {
 			slot := ptrSlots[i]
 			if slot != 0 {

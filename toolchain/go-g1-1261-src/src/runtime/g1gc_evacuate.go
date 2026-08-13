@@ -310,7 +310,7 @@ func g1gcEvacuate() {
 	g1LastEvacObjects = 0
 	g1LastEvacBytes = 0
 	g1LastRewriteSpans = 0
-	if debug.g1gc == 0 || debug.g1evac == 0 || g1EvacIndexActive.Load() == 0 {
+	if debug.g1gc == 0 || debug.g1evac == 0 || g1EvacIndexActive == 0 {
 		return
 	}
 	evacStart := nanotime()

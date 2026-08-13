@@ -419,7 +419,7 @@ func bulkBarrierPreWrite(dst, src, size uintptr, typ *abi.Type) {
 		return
 	}
 	buf := &getg().m.p.ptr().wbBuf
-	recordSlots := g1EvacIndexActive.Load() != 0
+	recordSlots := g1EvacIndexActive != 0
 
 	// Double-check that the bitmaps generated in the two possible paths match.
 	const doubleCheck = false
@@ -487,7 +487,7 @@ func bulkBarrierPreWriteSrcOnly(dst, src, size uintptr, typ *abi.Type) {
 		return
 	}
 	buf := &getg().m.p.ptr().wbBuf
-	recordSlots := g1EvacIndexActive.Load() != 0
+	recordSlots := g1EvacIndexActive != 0
 	s := spanOf(dst)
 
 	// Double-check that the bitmaps generated in the two possible paths match.
@@ -1431,7 +1431,7 @@ func bulkBarrierBitmap(dst, src, size, maskOffset uintptr, bits *uint8) {
 	mask := uint8(1) << (word % 8)
 
 	buf := &getg().m.p.ptr().wbBuf
-	recordSlots := g1EvacIndexActive.Load() != 0
+	recordSlots := g1EvacIndexActive != 0
 	for i := uintptr(0); i < size; i += goarch.PtrSize {
 		if mask == 0 {
 			bits = addb(bits, 1)
@@ -1492,7 +1492,7 @@ func typeBitsBulkBarrier(typ *_type, dst, src, size uintptr) {
 	}
 	ptrmask := getGCMask(typ)
 	buf := &getg().m.p.ptr().wbBuf
-	recordSlots := g1EvacIndexActive.Load() != 0
+	recordSlots := g1EvacIndexActive != 0
 	var bits uint32
 	for i := uintptr(0); i < typ.PtrBytes; i += goarch.PtrSize {
 		if i&(goarch.PtrSize*8-1) == 0 {

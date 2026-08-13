@@ -1028,7 +1028,7 @@ func scanObjectSmall(spanBase, b, objSize uintptr, gcw *gcWork) {
 	// Process all the pointers we just got. The evacuation flag is stable
 	// for the whole scan, so check it once instead of per pointer.
 	owner := spanOf(spanBase)
-	evacActive := g1EvacIndexActive.Load() != 0
+	evacActive := g1EvacIndexActive != 0
 	for _, p := range gcw.ptrBuf[:nptrs] {
 		p = *(*uintptr)(unsafe.Pointer(p))
 		if p == 0 {
@@ -1084,7 +1084,7 @@ func scanObjectsSmall(base, objSize uintptr, elems uint16, gcw *gcWork, scans *g
 	// Process all the pointers we just got. The evacuation flag is stable
 	// for the whole scan, so check it once instead of per pointer.
 	owner := spanOf(base)
-	evacActive := g1EvacIndexActive.Load() != 0
+	evacActive := g1EvacIndexActive != 0
 	for _, p := range gcw.ptrBuf[:nptrs] {
 		p = *(*uintptr)(unsafe.Pointer(p))
 		if p == 0 {
@@ -1244,7 +1244,7 @@ func scanObject(b uintptr, gcw *gcWork) {
 	if n == 0 {
 		throw("scanObject n == 0")
 	}
-	evacActive := g1EvacIndexActive.Load() != 0
+	evacActive := g1EvacIndexActive != 0
 	if s.spanclass.noscan() {
 		// Correctness-wise this is ok, but it's inefficient
 		// if noscan objects reach here.

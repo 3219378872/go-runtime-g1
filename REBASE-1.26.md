@@ -26,10 +26,15 @@ Key 1.26 facts learned during the port:
   throughput, so the gated variant is kept.
 - g1Edges sits at the END of the p struct (after wbBuf) to avoid
   shifting hot fields' cache layout.
-- The remaining mark-term stall excess (~3x official events of
-  100-200us per run) is structural (present with g1gc=0 and with the
-  vanilla compiler) and was not isolated between the wbBuf slots array,
-  mspan fields, and p-struct footprint; absolute impact is small.
+- The remaining mark-term stall excess is structural and was bisected:
+  a vanilla runtime plus the G1 compiler has NO excess (12.5 vs 16
+  events/run, tp 1.014), so the runtime-side changes are the source.
+  Individually the barrier gating loads (13.5 vs 13.5) and mspan fields
+  (18.5 vs 16) are near parity; the excess only appears with the full
+  combination (mgc hooks + sweep hook + p-struct layout + g1gc files).
+  The per-pointer g1EvacIndexActive loads in the green scan paths were
+  hoisted out of the pointer loops regardless (flag is stable per scan).
+- Evac threshold: 2 GiB (mt p99 identical at 2/4 GiB - stall-dominated).
 
 Remaining measured gap vs official go1.26.1 (pointer64): mark-term p99
 ~100us vs ~65us, dominated by candidate-specific non-evac mark-term

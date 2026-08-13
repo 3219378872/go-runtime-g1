@@ -1,11 +1,26 @@
 # Rebase plan: G1 fork onto go1.26.1
 
-Status: scope assessment (2026-08-13). The fork is go1.25.0-based
-(`toolchain/go-g1-src`). The objective compares against the official
-go1.26.1 runtime; current measurements already meet or beat official
-go1.26.1 on throughput, STW total, GC CPU, and overall STW p50-p999,
-with the mark-term p99 tail (~94us vs ~60us) remaining. A rebase onto
-go1.26.1 source would make the comparison base-version-clean.
+Status: PORTED AND BUILDING (2026-08-13). The G1 hooks now also live in
+`toolchain/go-g1-1261-src` (gitignored, based on go1.26.1 source). The
+port builds with `GOROOT_BOOTSTRAP=/usr/local/go ./make.bash` and passes
+the runtime/SSA/project/race gates. It adapts the hooks to Go 1.26's
+default Green Tea GC: inline mark bits for small spans (g1gcCountLive
+and g1gcClearSourceBits handle both layouts), inbound-edge recording in
+the green scanObject/scanObjectSmall/scanObjectsSmall paths, and the
+compiler writeBarrier struct gained `g1Evac uint32` at offset 4.
+
+Key 1.26 facts learned during the port:
+- Go 1.26's default runtime IS the Green Tea GC (GOEXPERIMENT
+  greenteagc on by default; official binaries contain
+  spanInlineMarkBits.init and scanObjectSmall).
+- Mark bits for small spans live inline in the span until
+  moveInlineMarks merges them into gcmarkBits during sweep.
+- mgcmark.go is split into mgcmark.go (shared), mgcmark_greenteagc.go
+  (green), and mgcmark_nogreenteagc.go (classic); the G1 hooks need
+  per-build helpers (g1gcCountInlineMarks, g1gcClearInlineMarks).
+- scanObjectSmall/scanObjectsSmall are the span-batched scan paths and
+  need the same inbound recording as scanObject.
+
 
 ## Upstream delta 1.25.0 -> 1.26.1 in fork-modified files
 

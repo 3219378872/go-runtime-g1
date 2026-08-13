@@ -2,7 +2,6 @@
 toolchain/go-g1-src/bin/
 toolchain/go-g1-src/pkg/
 toolchain/go-greentea-src/
-toolchain/go-g1-1261-src/
 
 # Generated benchmark binaries, traces, profiles, and summaries.
 bench/bin/

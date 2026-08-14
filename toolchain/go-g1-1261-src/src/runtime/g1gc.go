@@ -159,7 +159,7 @@ func g1gcCycleActive(epoch uint64) bool {
 		return false
 	}
 	allocNow := gcController.totalAlloc.Load()
-	return allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1EvacuationMinAllocBytes
+	return allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1gcEvacThreshold()
 }
 
 // g1gcStartCycle publishes which G1 consumers need region state for this
@@ -180,7 +180,7 @@ func g1gcStartCycle() {
 	g1gcSetEvacIndexActive(0)
 	if debug.g1evac != 0 {
 		allocNow := gcController.totalAlloc.Load()
-		if allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1EvacuationMinAllocBytes {
+		if allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1gcEvacThreshold() {
 			g1gcResetInbound()
 			g1gcResetWBSlots()
 			evacActive = true

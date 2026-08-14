@@ -26,8 +26,18 @@ const (
 // Full-heap rewriting is deliberately throttled. A cycle still computes the
 // live-region policy every time, but moving objects only when enough elapsed
 // allocation has accumulated keeps the experimental stop-the-world path from
-// turning every small GC into a global rewrite.
-const g1EvacuationMinAllocBytes = 4 << 30
+// turning every small GC into a global rewrite. The threshold scales with the
+// retained heap so large heaps do not pay a full-heap rewrite every few
+// cycles.
+func g1gcEvacThreshold() uint64 {
+	const minThreshold = 4 << 30
+	live := gcController.heapLive.Load()
+	scaled := live * 16
+	if scaled < minThreshold {
+		return minThreshold
+	}
+	return scaled
+}
 
 // g1EvacRegionEpoch is a conservative address filter for pointer rewriting.
 // It is reset logically by the epoch rather than by clearing the table.
@@ -327,7 +337,7 @@ func g1gcEvacuate() {
 	// allocation counter instead, so small heaps eventually receive real
 	// evacuation without making every GC globally rewrite the heap.
 	allocNow := gcController.totalAlloc.Load()
-	if allocNow < g1EvacLastAlloc || allocNow-g1EvacLastAlloc < g1EvacuationMinAllocBytes {
+	if allocNow < g1EvacLastAlloc || allocNow-g1EvacLastAlloc < g1gcEvacThreshold() {
 		return
 	}
 	g1EvacLastAlloc = allocNow

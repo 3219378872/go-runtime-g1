@@ -479,7 +479,11 @@ func gcScanFinalizer(spf *specialfinalizer, s *mspan, gcw *gcWork) {
 	// the object (but *not* the object itself or
 	// we'll never collect it).
 	if !s.spanclass.noscan() {
-		scanObject(p, gcw)
+		if g1gcRewriteActive != 0 {
+			g1gcRewriteObject(s, p)
+		} else {
+			scanObject(p, gcw)
+		}
 	}
 
 	// The special itself is also a root.
@@ -1493,11 +1497,20 @@ func scanblock(b0, n0 uintptr, ptrmask *uint8, gcw *gcWork, stk *stackScanState)
 		for j := 0; j < 8 && i < n; j++ {
 			if bits&1 != 0 {
 				// Same work as in scanObject; see comments there.
-				p := *(*uintptr)(unsafe.Pointer(b + i))
+				slot := (*uintptr)(unsafe.Pointer(b + i))
+				p := *slot
+				if g1gcRewriteActive != 0 {
+					oldp := p
+					p = g1gcForwardPointer(p)
+					*slot = p
+					if debug.g1evac > 1 && oldp != p {
+						print("g1evac rewrite root slot=", hex(b+i), " old=", hex(oldp), " new=", hex(p), "\n")
+					}
+				}
 				if p != 0 {
 					if stk != nil && p >= stk.stack.lo && p < stk.stack.hi {
 						stk.putPtr(p, false)
-					} else {
+					} else if g1gcRewriteActive == 0 {
 						if !tryDeferToSpanScan(p, gcw) {
 							if obj, span, objIndex := findObject(p, b, i); obj != 0 {
 								greyobject(obj, b, i, span, gcw, objIndex)

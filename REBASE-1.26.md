@@ -41,11 +41,16 @@ Key 1.26 facts learned during the port:
   atomic load per scanObject/small-span-scan call on every cycle.
   pointer64 throughput ~1.001x and GC CPU ~0.998x in matched runs.
 
-Remaining measured gap vs official go1.26.1 (pointer64): mark-term p99
-~100us vs ~65us, dominated by candidate-specific non-evac mark-term
-stalls (~2x official) whose source is not yet isolated (compiler vs
-runtime struct footprint); throughput ~0.97-0.98x. pointer256 and alloc
-are at parity or better on all metrics.
+Correctness note: a critical 1.26-port bug (lost scanblock root-rewrite
+hook) was found via a 'found bad pointer in Go heap' crash at
+GOMAXPROCS=4/live=2048 and fixed (mgcmark.go scanblock rewrite +
+gcScanFinalizer branch). Root/stack pointers are now correctly forwarded
+during evacuation; gccheckmark and repeated stress runs are clean.
+
+Status vs official go1.26.1 (noisy shared machine): pointer64 28-run
+aggregated mt p99 92 vs 93us, stalls/run parity, tp 0.995, gc_cpu 1.000;
+pointer256 and alloc at parity or better; after the root-rewrite fix,
+pointer64 tp 1.038 / stw_total 0.960 / gc_cpu 0.962 in matched runs.
 
 
 ## Upstream delta 1.25.0 -> 1.26.1 in fork-modified files

@@ -36,6 +36,10 @@ Key 1.26 facts learned during the port:
 - Evac threshold: 4 GiB. With the p-struct fix, pointer64 mt p99 is
   75us vs 65us (1.15x) at 4 GiB versus 98us at 2 GiB; stalls/run are at
   parity (18.5 vs 17).
+- g1EvacIndexActive is now a plain uint32 written only at STW and read
+  plainly in marking hot paths (same protocol as gcphase), removing an
+  atomic load per scanObject/small-span-scan call on every cycle.
+  pointer64 throughput ~1.001x and GC CPU ~0.998x in matched runs.
 
 Remaining measured gap vs official go1.26.1 (pointer64): mark-term p99
 ~100us vs ~65us, dominated by candidate-specific non-evac mark-term

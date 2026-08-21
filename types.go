@@ -540,7 +540,7 @@ func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
 	stats.PhaseDurations[PhaseEvacuation] = time.Since(evacuationStart)
 
 	stats.PauseDuration = stats.PhaseDurations[PhaseInitialMark] + stats.PhaseDurations[PhaseRemark] + stats.PhaseDurations[PhaseCleanup] + stats.PhaseDurations[PhaseEvacuation]
-	stats.AfterUsedBytes = h.UsedBytes()
+	// finishCycleLocked recorded AfterUsedBytes inside the evacuation critical section.
 	stats.Completed = true
 	h.mu.Lock()
 	h.lastStats = cloneStats(stats)

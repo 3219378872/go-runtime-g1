@@ -535,6 +535,8 @@ func (h *Heap) RememberedSet(id RegionID) ([]RegionID, error) {
 
 // RegionCount returns the fixed number of regions in the heap.
 func (h *Heap) RegionCount() int {
+	h.world.RLock()
+	defer h.world.RUnlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.regions)

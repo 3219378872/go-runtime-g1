@@ -12,8 +12,6 @@ import (
 	"unsafe"
 )
 
-const g1EvacuationMaxBytes = 4 << 20
-
 // Rewriting every pointerful object is proportional to the retained heap, so
 // do not evacuate a tiny amount of live data from a large heap. The absolute
 // floor still lets small heaps exercise evacuation instead of turning the
@@ -22,6 +20,22 @@ const (
 	g1EvacuationMinLiveBytes     = 1 << 10
 	g1EvacuationLiveBenefitScale = 4096
 )
+
+// The rewrite pause is bounded by the number of owner spans that hold pointers
+// into the selected source regions, which a dense pointer graph can push
+// toward a full-heap walk regardless of the copy budget. Deferring whole
+// evacuations keeps that pause inside this bound instead. The object bound
+// additionally caps the destination rescan and the per-span walks, whose cost
+// scales with live objects rather than spans.
+const (
+	g1EvacuationMaxRewriteSpans  = 512
+	g1EvacuationMaxRewriteObject = 16 << 10
+)
+
+// Evacuation pauses scale with the copied byte budget through the destination
+// slot walk, so keep the per-window copy small enough for the pause to stay
+// near ordinary mark termination.
+const g1EvacuationCopyBudget = 1 << 20
 
 // Full-heap rewriting is deliberately throttled. A cycle still computes the
 // live-region policy every time, but moving objects only when enough elapsed
@@ -341,6 +355,16 @@ func g1gcEvacuate() {
 		return
 	}
 	g1EvacLastAlloc = allocNow
+	if g1InboundOverflow.Load() != 0 {
+		// Marking overflowed the bounded inbound-edge index, so the targeted
+		// rewrite would degrade into an unbounded full-heap walk inside this
+		// pause. Defer evacuation instead: sources stay unmoved, the stale
+		// edge state is discarded, and the next activation starts clean.
+		g1gcResetInbound()
+		g1LastEvacNanos = nanotime() - evacStart
+		g1gcSetEvacIndexActive(0)
+		return
+	}
 	epoch := uint64(work.cycles.Load())
 	g1EvacEpoch = epoch
 	g1gcMarkPinnedSpans(epoch)
@@ -358,7 +382,7 @@ func g1gcEvacuate() {
 	// Select twice. The first pass avoids allocating destination spans when
 	// the total benefit cannot amortize the full-heap rewrite; the second pass
 	// performs the existing copy with the same deterministic eligibility walk.
-	remaining := uint64(g1EvacuationMaxBytes)
+	remaining := uint64(g1EvacuationCopyBudget)
 	var selectedLiveBytes uint64
 	for i := uint64(0); i < g1LowLiveCount && remaining != 0; i++ {
 		for s := g1RegionSpans[g1LowLiveRegions[i]]; s != nil; s = s.g1next {
@@ -381,7 +405,54 @@ func g1gcEvacuate() {
 		return
 	}
 
-	remaining = uint64(g1EvacuationMaxBytes)
+	// Flush the per-P dedup tables and project the rewrite set before any
+	// copy commits. A dense pointer graph can push the "targeted" owner set
+	// toward a full-heap walk regardless of the copy budget, so defer whole
+	// evacuations whose projected set exceeds the bound. Sources are still
+	// unmoved at this point, which makes deferring trivially safe.
+	g1gcFlushInboundEdges()
+	if g1InboundOverflow.Load() != 0 {
+		g1gcResetInbound()
+		g1LastEvacSelectNs = nanotime() - selectStart
+		g1LastEvacNanos = nanotime() - evacStart
+		g1gcSetEvacIndexActive(0)
+		return
+	}
+	budgetRemaining := uint64(g1EvacuationCopyBudget)
+	var projectedObjects uint64
+	for i := uint64(0); i < g1LowLiveCount && budgetRemaining != 0; i++ {
+		for s := g1RegionSpans[g1LowLiveRegions[i]]; s != nil; s = s.g1next {
+			liveObjects, _, ok := g1gcEvacEligible(s, epoch)
+			if !ok {
+				continue
+			}
+			spanBytes := uint64(s.npages) * uint64(pageSize)
+			if spanBytes > budgetRemaining {
+				continue
+			}
+			budgetRemaining -= spanBytes
+			projectedObjects += liveObjects
+			g1gcCollectInboundForSource(s)
+		}
+	}
+	if g1LastRewriteSpans > g1EvacuationMaxRewriteSpans || projectedObjects > g1EvacuationMaxRewriteObject {
+		// Unwind the projected set without rewriting. The epoch tags make the
+		// stale marks invisible to the next evacuation, and no destination
+		// spans exist yet, so nothing on the heap refers to moved objects.
+		for s := g1RewriteSpanHead; s != nil; {
+			next := s.g1rewriteNext
+			s.g1rewriteNext = nil
+			s = next
+		}
+		g1RewriteSpanHead = nil
+		g1LastRewriteSpans = 0
+		g1LastEvacSelectNs = nanotime() - selectStart
+		g1LastEvacNanos = nanotime() - evacStart
+		g1gcSetEvacIndexActive(0)
+		return
+	}
+
+	remaining = uint64(g1EvacuationCopyBudget)
 	for i := uint64(0); i < g1LowLiveCount && remaining != 0; i++ {
 		for s := g1RegionSpans[g1LowLiveRegions[i]]; s != nil; s = s.g1next {
 			liveObjects, _, ok := g1gcEvacEligible(s, epoch)
@@ -426,22 +497,48 @@ func g1gcEvacuate() {
 	}
 	g1LastEvacSelectNs = nanotime() - selectStart
 	if g1EvacDestHead == nil {
+		// Nothing was copied, so discard the projected rewrite set.
+		for s := g1RewriteSpanHead; s != nil; {
+			next := s.g1rewriteNext
+			s.g1rewriteNext = nil
+			s = next
+		}
+		g1RewriteSpanHead = nil
+		g1LastRewriteSpans = 0
 		g1LastEvacNanos = nanotime() - evacStart
 		g1gcSetEvacIndexActive(0)
 		return
 	}
 
-	g1gcFlushInboundEdges()
 	g1gcDebugUserArenaState("before-rewrite")
 	g1gcRewriteActive = 1
 	rootStart := nanotime()
 	g1gcUpdateRoots()
 	g1LastEvacRootsNs = nanotime() - rootStart
 	heapStart := nanotime()
-	// Rewrite both the existing heap owners and the newly allocated
-	// destination spans. Destination objects can themselves point at another
-	// evacuated source span, so omitting the second pass leaves stale pointers.
-	g1gcRewriteHeap(len(allspans))
+	// Rewrite the bounded owner set that was built and committed before the
+	// copies, then the newly allocated destination spans. Destination objects
+	// can themselves point at another evacuated source span, so omitting the
+	// second pass leaves stale pointers.
+	for s := g1RewriteSpanHead; s != nil; {
+		next := s.g1rewriteNext
+		g1gcRewriteSpan(s)
+		s.g1rewriteNext = nil
+		s = next
+	}
+	for d := g1EvacDestHead; d != nil; d = d.g1evacNext {
+		if d.spanclass.noscan() {
+			continue
+		}
+		abits := d.allocBitsForIndex(0)
+		for j := uintptr(0); j < uintptr(d.nelems); j++ {
+			if abits.isMarked() {
+				g1gcRewriteObject(d, d.base()+j*d.elemsize)
+			}
+			abits.advance()
+		}
+	}
+	g1RewriteSpanHead = nil
 	g1LastEvacHeapNs = nanotime() - heapStart
 	g1gcRewriteActive = 0
 	g1gcDebugUserArenaState("after-rewrite")

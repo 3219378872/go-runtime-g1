@@ -38,6 +38,7 @@ type g1RegionStats struct {
 	generation  atomic.Uint64
 	liveBytes   atomic.Uint64
 	liveObjects atomic.Uint64
+	liveGen     atomic.Uint64
 	usedListed  atomic.Uint32
 	usedBytes   atomic.Uint64
 	usedObjects atomic.Uint64
@@ -183,6 +184,9 @@ func g1gcStartCycle() {
 		if allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1gcEvacThreshold() {
 			g1gcResetInbound()
 			g1gcResetWBSlots()
+			// Re-base the incremental live totals for this window's marking
+			// cycle so its mark termination can skip the mark-bit census.
+			g1gcResetLiveCounts()
 			evacActive = true
 			g1gcSetEvacIndexActive(1)
 		}
@@ -407,11 +411,62 @@ func g1gcLinkSpan(span *mspan) {
 	g1RegionSpans[index] = span
 }
 
+// g1LiveGenMark identifies the current accumulation window. A region whose
+// liveGen differs was not touched since the last re-base, so its counter may
+// hold stale bytes from an earlier cycle and the first mark overwrites
+// instead of accumulating.
+var g1LiveGenMark uint64
+
+// g1gcResetLiveCounts prepares the incremental live totals for one marking
+// cycle. It runs at evacuation-window cycle start while the world is stopped,
+// so the counters never straddle cycles.
+func g1gcResetLiveCounts() {
+	g1LiveGenMark++
+	for i, count := uint64(0), g1UsedCount.Load(); i < count; i++ {
+		region := &g1Regions[g1UsedRegions[i]]
+		region.liveBytes.Store(0)
+		region.liveObjects.Store(0)
+		region.liveGen.Store(g1LiveGenMark)
+	}
+}
+
+// g1gcRecordLiveObject charges one first-marked object to its region's live
+// total during an evacuation-window marking cycle. This replaces the
+// stop-the-world mark-bit census for those cycles; every other cycle skips
+// the hook entirely. Two racers that both see a stale liveGen overwrite each
+// other with single-object sizes, which undercounts rather than overcounts
+// and only makes selection more conservative.
+//
+//go:nosplit
+func g1gcRecordLiveObject(span *mspan) {
+	if debug.g1evac == 0 || g1EvacIndexActive == 0 {
+		return
+	}
+	region := &g1Regions[g1gcRegionIndex(span.base())]
+	mark := g1LiveGenMark
+	if region.liveGen.Load() != mark {
+		region.liveBytes.Store(uint64(span.elemsize))
+		region.liveGen.Store(mark)
+		if g1gcObjectStatsActive != 0 {
+			region.liveObjects.Store(1)
+		}
+		return
+	}
+	region.liveBytes.Add(int64(span.elemsize))
+	if g1gcObjectStatsActive != 0 {
+		region.liveObjects.Add(1)
+	}
+}
+
 // g1gcInitializeUsed rebuilds region state from authoritative span allocation
 // and mark bits at mark termination.
 func g1gcInitializeUsed() {
 	initStart := nanotime()
 	g1LowLiveCount = 0
+	// During an evacuation window the incremental totals were re-based at
+	// cycle start and hold this cycle's exact live bytes, so the mark-bit
+	// census can be skipped entirely.
+	countLive := debug.g1evac == 0 || g1EvacIndexActive == 0
 	previousUsedCount := g1UsedCount.Load()
 	for i := uint64(0); i < previousUsedCount; i++ {
 		index := g1UsedRegions[i]
@@ -419,8 +474,10 @@ func g1gcInitializeUsed() {
 		region.usedListed.Store(0)
 		region.usedBytes.Store(0)
 		region.usedObjects.Store(0)
-		region.liveBytes.Store(0)
-		region.liveObjects.Store(0)
+		if countLive {
+			region.liveBytes.Store(0)
+			region.liveObjects.Store(0)
+		}
 		g1RegionSpans[index] = nil
 	}
 	g1UsedCount.Store(0)
@@ -456,11 +513,13 @@ func g1gcInitializeUsed() {
 		if g1gcObjectStatsActive != 0 {
 			region.usedObjects.Store(region.usedObjects.Load() + uint64(span.allocCount))
 		}
-		liveObjects, liveBytes := g1gcCountLive(span)
-		if liveBytes != 0 {
-			region.liveBytes.Store(region.liveBytes.Load() + liveBytes)
-			if g1gcObjectStatsActive != 0 {
-				region.liveObjects.Store(region.liveObjects.Load() + liveObjects)
+		if countLive {
+			liveObjects, liveBytes := g1gcCountLive(span)
+			if liveBytes != 0 {
+				region.liveBytes.Store(region.liveBytes.Load() + liveBytes)
+				if g1gcObjectStatsActive != 0 {
+					region.liveObjects.Store(region.liveObjects.Load() + liveObjects)
+				}
 			}
 		}
 	}

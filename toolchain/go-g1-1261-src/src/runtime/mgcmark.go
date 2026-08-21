@@ -1691,6 +1691,7 @@ func greyobject(obj, base, off uintptr, span *mspan, gcw *gcWork, objIndex uintp
 			return
 		}
 		mbits.setMarked()
+		g1gcRecordLiveObject(span)
 
 		// Mark span.
 		arena, pageIdx, pageMask := pageIndexOf(span.base())
@@ -1783,6 +1784,7 @@ func gcmarknewobject(span *mspan, obj uintptr) {
 	// Mark object.
 	objIndex := span.objIndex(obj)
 	span.markBitsForIndex(objIndex).setMarked()
+	g1gcRecordLiveObject(span)
 	if goexperiment.GreenTeaGC && gcUsesSpanInlineMarkBits(span.elemsize) {
 		// No need to scan the new object.
 		span.scannedBitsForIndex(objIndex).setMarked()

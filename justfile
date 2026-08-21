@@ -57,31 +57,31 @@ verify-runtime: check-tools build-toolchain test-runtime test-ssa
 
 # Run a short matched workload smoke test.
 bench-smoke:
-    DURATION="{{smoke_duration}}" ./bench/run.sh
+    CANDIDATE_ROOT="{{candidate_root}}" DURATION="{{smoke_duration}}" ./bench/run.sh
 
 # Run one matched official-versus-candidate workload comparison.
 bench:
-    ./bench/run.sh
+    CANDIDATE_ROOT="{{candidate_root}}" ./bench/run.sh
 
 # Run an alternating repeated comparison and write the aggregate summary.
 bench-repeat:
-    ./bench/repeat.sh
+    CANDIDATE_ROOT="{{candidate_root}}" ./bench/repeat.sh
 
 # Run repeated collection accounting with the G1 collector enabled.
 bench-g1gc:
-    GODEBUG_VALUE="{{g1gc_godebug}}" LABEL="{{g1gc_label}}" ./bench/repeat.sh
+    CANDIDATE_ROOT="{{candidate_root}}" GODEBUG_VALUE="{{g1gc_godebug}}" LABEL="{{g1gc_label}}" ./bench/repeat.sh
 
 # Run repeated collection-set measurements and write median/spread data.
 bench-g1gcset:
-    GODEBUG_VALUE="{{g1gcset_godebug}}" LABEL="{{g1gcset_label}}" ./bench/repeat.sh
+    CANDIDATE_ROOT="{{candidate_root}}" GODEBUG_VALUE="{{g1gcset_godebug}}" LABEL="{{g1gcset_label}}" ./bench/repeat.sh
 
 # Run repeated evacuation measurements and write median/spread data.
 bench-g1evac:
-    GODEBUG_VALUE="{{g1evac_godebug}}" LABEL="{{g1evac_label}}" ./bench/repeat.sh
+    CANDIDATE_ROOT="{{candidate_root}}" GODEBUG_VALUE="{{g1evac_godebug}}" LABEL="{{g1evac_label}}" ./bench/repeat.sh
 
 # Run the diagnostic trace configuration used to inspect evacuation counters.
 bench-trace:
-    GODEBUG_VALUE="{{trace_godebug}}" LABEL="{{trace_label}}" ./bench/repeat.sh
+    CANDIDATE_ROOT="{{candidate_root}}" GODEBUG_VALUE="{{trace_godebug}}" LABEL="{{trace_label}}" ./bench/repeat.sh
 
 # Print the latest repeated comparison summary for LABEL (default: collection-set).
 bench-summary:

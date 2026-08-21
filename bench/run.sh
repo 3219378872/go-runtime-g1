@@ -3,7 +3,10 @@ set -euo pipefail
 
 repo_dir=$(cd "$(dirname "$0")/.." && pwd)
 official_go=${OFFICIAL_GO:-/usr/local/go/bin/go}
-candidate_go=${CANDIDATE_GO:-"$repo_dir/toolchain/go-g1-src/bin/go"}
+# Keep the default in sync with CANDIDATE_ROOT in the justfile; CANDIDATE_GO
+# still wins when a caller needs a specific binary.
+candidate_root=${CANDIDATE_ROOT:-"$repo_dir/toolchain/go-g1-1261-src"}
+candidate_go=${CANDIDATE_GO:-"$candidate_root/bin/go"}
 duration=${DURATION:-5s}
 gomaxprocs=${GOMAXPROCS_VALUE:-2}
 gogc=${GOGC_VALUE:-100}

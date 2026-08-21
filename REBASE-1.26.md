@@ -1,7 +1,9 @@
 # Rebase plan: G1 fork onto go1.26.1
 
 Status: PORTED AND BUILDING (2026-08-13). The G1 hooks now also live in
-`toolchain/go-g1-1261-src` (gitignored, based on go1.26.1 source). The
+`toolchain/go-g1-1261-src` (based on go1.26.1 source; only its generated
+`bin/` and `pkg/` trees are gitignored — the hooked source files are
+tracked so the port stays reviewable). The
 port builds with `GOROOT_BOOTSTRAP=/usr/local/go ./make.bash` and passes
 the runtime/SSA/project/race gates. It adapts the hooks to Go 1.26's
 default Green Tea GC: inline mark bits for small spans (g1gcCountLive

@@ -196,6 +196,9 @@ func (c *mcache) refill(spc spanClass) {
 		// Count the allocs in inconsistent, internal stats.
 		bytesAllocated := slotsUsed * int64(s.elemsize)
 		gcController.totalAlloc.Add(bytesAllocated)
+		if debug.g1gc != 0 {
+			g1gcRecordAllocBatch(s, uint64(slotsUsed))
+		}
 
 		// Clear the second allocCount just to be safe.
 		s.allocCountBeforeCache = 0
@@ -267,6 +270,9 @@ func (c *mcache) allocLarge(size uintptr, noscan bool) *mspan {
 
 	// Count the alloc in inconsistent, internal stats.
 	gcController.totalAlloc.Add(int64(npages * pageSize))
+	if debug.g1gc != 0 {
+		g1gcRecordAllocBatch(s, 1)
+	}
 
 	// Update heapLive.
 	gcController.update(int64(s.npages*pageSize), 0)
@@ -308,6 +314,9 @@ func (c *mcache) releaseAll() {
 			// Adjust the actual allocs in inconsistent, internal stats.
 			// We assumed earlier that the full span gets allocated.
 			gcController.totalAlloc.Add(slotsUsed * int64(s.elemsize))
+			if debug.g1gc != 0 {
+				g1gcRecordAllocBatch(s, uint64(slotsUsed))
+			}
 
 			if s.sweepgen != sg+1 {
 				// refill conservatively counted unallocated slots in gcController.heapLive.

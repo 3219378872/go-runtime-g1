@@ -136,6 +136,7 @@ func g1gcForwardPointer(p uintptr) uintptr {
 	}
 	destBase := dest.base() + objIndex*dest.elemsize
 	forwarded := destBase + (p - base)
+	g1DebugForwardCount++
 	if debug.g1evac > 1 {
 		print("g1evac forward p=", hex(p), " source=", hex(base), " index=", objIndex, " dest=", hex(forwarded), " destbase=", hex(dest.base()), "\\n")
 	}
@@ -316,6 +317,34 @@ func g1gcCopyEvacuatedSpan(src, dst *mspan, liveObjects uint64) {
 	dst.refillAllocCache(0)
 }
 
+// g1EvacuationMaxCandidates bounds the spans one window may copy. The copy
+// budget already caps total bytes; each candidate is at least one page.
+var g1EvacCandidates [1 << 8]*mspan
+var g1EvacCandidateLive [1 << 8]uint64
+
+// g1gcDiscardProjectedSet unwinds a projection made by
+// g1gcCollectInboundForSource without rewriting anything. The epoch tags make
+// the stale marks invisible to the next evacuation, and no destination spans
+// exist yet, so nothing on the heap refers to moved objects.
+func g1gcDiscardProjectedSet() {
+	for s := g1RewriteSpanHead; s != nil; {
+		next := s.g1rewriteNext
+		s.g1rewriteNext = nil
+		s = next
+	}
+	g1RewriteSpanHead = nil
+	g1LastRewriteSpans = 0
+}
+
+func g1gcTagLowLiveRegions() uint32 {
+	tag := g1ScanTag + 1
+	g1ScanTag = tag
+	for i := uint64(0); i < g1LowLiveCount; i++ {
+		g1Regions[g1LowLiveRegions[i]].scanTag = tag
+	}
+	return tag
+}
+
 // g1gcEvacuate copies a bounded set of low-live spans before the ordinary
 // sweep transition. Destination spans are intentionally not put on central
 // lists until gcSweep has advanced the generation.
@@ -379,121 +408,112 @@ func g1gcEvacuate() {
 		minLiveBytes = g1EvacuationMinLiveBytes
 	}
 
-	// Select twice. The first pass avoids allocating destination spans when
-	// the total benefit cannot amortize the full-heap rewrite; the second pass
-	// performs the existing copy with the same deterministic eligibility walk.
-	remaining := uint64(g1EvacuationCopyBudget)
-	var selectedLiveBytes uint64
-	for i := uint64(0); i < g1LowLiveCount && remaining != 0; i++ {
-		for s := g1RegionSpans[g1LowLiveRegions[i]]; s != nil; s = s.g1next {
-			_, liveBytes, ok := g1gcEvacEligible(s, epoch)
-			if !ok {
-				continue
-			}
-			spanBytes := uint64(s.npages) * uint64(pageSize)
-			if spanBytes > remaining {
-				continue
-			}
-			selectedLiveBytes += liveBytes
-			remaining -= spanBytes
-		}
-	}
-	if selectedLiveBytes < minLiveBytes {
-		g1LastEvacSelectNs = nanotime() - selectStart
-		g1LastEvacNanos = nanotime() - evacStart
-		g1gcSetEvacIndexActive(0)
-		return
-	}
-
-	// Flush the per-P dedup tables and project the rewrite set before any
-	// copy commits. A dense pointer graph can push the "targeted" owner set
-	// toward a full-heap walk regardless of the copy budget, so defer whole
-	// evacuations whose projected set exceeds the bound. Sources are still
-	// unmoved at this point, which makes deferring trivially safe.
+	// One sweep collects everything selection needs: the copy candidates
+	// with their live counts, the benefit estimate, and the projected
+	// rewrite set. The copies themselves allocate destination spans, so they
+	// must not run inside the heap walk; the collected list is replayed
+	// after the bounds checks below.
 	g1gcFlushInboundEdges()
 	if g1InboundOverflow.Load() != 0 {
+		// Marking overflowed the bounded inbound-edge index, so the targeted
+		// rewrite would degrade into an unbounded full-heap walk inside this
+		// pause. Defer evacuation: sources stay unmoved and stale edge state
+		// is discarded.
 		g1gcResetInbound()
 		g1LastEvacSelectNs = nanotime() - selectStart
 		g1LastEvacNanos = nanotime() - evacStart
 		g1gcSetEvacIndexActive(0)
 		return
 	}
-	budgetRemaining := uint64(g1EvacuationCopyBudget)
+	var selectedLiveBytes uint64
 	var projectedObjects uint64
-	for i := uint64(0); i < g1LowLiveCount && budgetRemaining != 0; i++ {
-		for s := g1RegionSpans[g1LowLiveRegions[i]]; s != nil; s = s.g1next {
-			liveObjects, _, ok := g1gcEvacEligible(s, epoch)
-			if !ok {
-				continue
-			}
-			spanBytes := uint64(s.npages) * uint64(pageSize)
-			if spanBytes > budgetRemaining {
-				continue
-			}
-			budgetRemaining -= spanBytes
-			projectedObjects += liveObjects
-			g1gcCollectInboundForSource(s)
+	budgetRemaining := uint64(g1EvacuationCopyBudget)
+	candidateSpans := 0
+	tag := g1gcTagLowLiveRegions()
+	g1gcSweepHeapSpans(tag, func(s *mspan, _ uintptr) bool {
+		if budgetRemaining == 0 || candidateSpans == len(g1EvacCandidates) {
+			return false
 		}
+		liveObjects, liveBytes, ok := g1gcEvacEligible(s, epoch)
+		if !ok {
+			return true
+		}
+		// Regions that any root slot referenced during marking stay put so
+		// the pause never has to rewrite root slots.
+		index := g1gcRegionIndex(s.base())
+		if g1RootRegions[index/8]>>(index&7)&1 != 0 {
+			return true
+		}
+		spanBytes := uint64(s.npages) * uint64(pageSize)
+		if spanBytes > budgetRemaining {
+			return true
+		}
+		budgetRemaining -= spanBytes
+		selectedLiveBytes += liveBytes
+		projectedObjects += liveObjects
+		g1gcCollectInboundForSource(s)
+		g1EvacCandidates[candidateSpans] = s
+		g1EvacCandidateLive[candidateSpans] = liveObjects
+		candidateSpans++
+		return true
+	})
+	if selectedLiveBytes < minLiveBytes {
+		g1gcDiscardProjectedSet()
+		for c := 0; c < candidateSpans; c++ {
+			g1EvacCandidates[c] = nil
+		}
+		g1LastEvacSelectNs = nanotime() - selectStart
+		g1LastEvacNanos = nanotime() - evacStart
+		g1gcSetEvacIndexActive(0)
+		return
 	}
 	if g1LastRewriteSpans > g1EvacuationMaxRewriteSpans || projectedObjects > g1EvacuationMaxRewriteObject {
 		// Unwind the projected set without rewriting. The epoch tags make the
 		// stale marks invisible to the next evacuation, and no destination
 		// spans exist yet, so nothing on the heap refers to moved objects.
-		for s := g1RewriteSpanHead; s != nil; {
-			next := s.g1rewriteNext
-			s.g1rewriteNext = nil
-			s = next
+		g1gcDiscardProjectedSet()
+		for c := 0; c < candidateSpans; c++ {
+			g1EvacCandidates[c] = nil
 		}
-		g1RewriteSpanHead = nil
-		g1LastRewriteSpans = 0
 		g1LastEvacSelectNs = nanotime() - selectStart
 		g1LastEvacNanos = nanotime() - evacStart
 		g1gcSetEvacIndexActive(0)
 		return
 	}
 
-	remaining = uint64(g1EvacuationCopyBudget)
-	for i := uint64(0); i < g1LowLiveCount && remaining != 0; i++ {
-		for s := g1RegionSpans[g1LowLiveRegions[i]]; s != nil; s = s.g1next {
-			liveObjects, _, ok := g1gcEvacEligible(s, epoch)
-			if !ok {
-				continue
-			}
-			spanBytes := uint64(s.npages) * uint64(pageSize)
-			if spanBytes > remaining {
-				continue
-			}
-			dst := g1gcAllocEvacDestination(s)
-			if dst == nil {
-				continue
-			}
-			if debug.g1evac > 1 {
-				print("g1evac source base=", hex(s.base()), " span=", s, " elemsize=", s.elemsize, " nelems=", s.nelems, " alloc=", s.allocCount, " live=", liveObjects, " sweepgen=", s.sweepgen, "\\n")
-			}
-			copyStart := nanotime()
-			g1gcCopyEvacuatedSpan(s, dst, liveObjects)
-			g1LastEvacCopyNs += nanotime() - copyStart
-			if dst.elemsize == 256 {
-				g1DebugLastDestination = dst
-			}
-			if debug.g1evac > 1 {
-				print("g1evac dest base=", hex(dst.base()), " span=", dst, " elemsize=", dst.elemsize, " nelems=", dst.nelems, " alloc=", dst.allocCount, " freeindex=", dst.freeindex, " sweepgen=", dst.sweepgen, "\\n")
-			}
-			atomic.Store(&dst.sweepgen, mheap_.sweepgen+1)
-			s.g1evacDest = dst
-			if liveObjects > uint64(^uint16(0)) {
-				throw("runtime: G1 evacuation live object count overflow")
-			}
-			s.g1evacLiveObjects = uint16(liveObjects)
-			g1gcMarkEvacuatedRegions(s, epoch)
-			dst.g1evacNext = g1EvacDestHead
-			g1EvacDestHead = dst
-			g1gcRecordSpanAllocation(dst, liveObjects)
-			g1LastEvacSpans++
-			g1LastEvacObjects += liveObjects
-			g1LastEvacBytes += uint64(liveObjects) * uint64(s.elemsize)
-			remaining -= spanBytes
+	for c := 0; c < candidateSpans; c++ {
+		s := g1EvacCandidates[c]
+		g1EvacCandidates[c] = nil
+		liveObjects := g1EvacCandidateLive[c]
+		dst := g1gcAllocEvacDestination(s)
+		if dst == nil {
+			continue
 		}
+		if debug.g1evac > 1 {
+			print("g1evac source base=", hex(s.base()), " span=", s, " elemsize=", s.elemsize, " nelems=", s.nelems, " alloc=", s.allocCount, " live=", liveObjects, " sweepgen=", s.sweepgen, "\n")
+		}
+		copyStart := nanotime()
+		g1gcCopyEvacuatedSpan(s, dst, liveObjects)
+		g1LastEvacCopyNs += nanotime() - copyStart
+		if dst.elemsize == 256 {
+			g1DebugLastDestination = dst
+		}
+		if debug.g1evac > 1 {
+			print("g1evac dest base=", hex(dst.base()), " span=", dst, " elemsize=", dst.elemsize, " nelems=", dst.nelems, " alloc=", dst.allocCount, " freeindex=", dst.freeindex, " sweepgen=", dst.sweepgen, "\n")
+		}
+		atomic.Store(&dst.sweepgen, mheap_.sweepgen+1)
+		s.g1evacDest = dst
+		if liveObjects > uint64(^uint16(0)) {
+			throw("runtime: G1 evacuation live object count overflow")
+		}
+		s.g1evacLiveObjects = uint16(liveObjects)
+		g1gcMarkEvacuatedRegions(s, epoch)
+		dst.g1evacNext = g1EvacDestHead
+		g1EvacDestHead = dst
+		g1gcRecordSpanAllocation(dst, liveObjects)
+		g1LastEvacSpans++
+		g1LastEvacObjects += liveObjects
+		g1LastEvacBytes += uint64(liveObjects) * uint64(s.elemsize)
 	}
 	g1LastEvacSelectNs = nanotime() - selectStart
 	if g1EvacDestHead == nil {
@@ -511,10 +531,13 @@ func g1gcEvacuate() {
 	}
 
 	g1gcDebugUserArenaState("before-rewrite")
+	// Root slots are guaranteed not to reference evacuated regions (the
+	// selection filter excluded every region the root scanner touched during
+	// marking), so only the bounded heap owner set and the fresh destination
+	// spans need rewriting. Under g1evac=4 a full root rescan runs anyway to
+	// prove that guarantee: any forward it performs means the filter leaked.
 	g1gcRewriteActive = 1
-	rootStart := nanotime()
-	g1gcUpdateRoots()
-	g1LastEvacRootsNs = nanotime() - rootStart
+	forwardBaseline := g1DebugForwardCount
 	heapStart := nanotime()
 	// Rewrite the bounded owner set that was built and committed before the
 	// copies, then the newly allocated destination spans. Destination objects
@@ -539,6 +562,14 @@ func g1gcEvacuate() {
 		}
 	}
 	g1RewriteSpanHead = nil
+	if debug.g1evac >= 4 {
+		rootStart := nanotime()
+		g1gcUpdateRoots()
+		if g1DebugForwardCount != forwardBaseline {
+			throw("runtime: G1 root slot referenced an evacuated region")
+		}
+		g1LastEvacRootsNs = nanotime() - rootStart
+	}
 	g1LastEvacHeapNs = nanotime() - heapStart
 	g1gcRewriteActive = 0
 	g1gcDebugUserArenaState("after-rewrite")
@@ -625,27 +656,39 @@ func g1gcRewriteStack(gp *g, gcw *gcWork) {
 		gp.waitsince = work.tstart
 	}
 
-	// Stack scanning has to use the same suspend/resume protocol as the
-	// ordinary markroot path. In particular, suspendG handles a goroutine
-	// that is still running or already preempted, and scanstack may shrink the
-	// stack while adjusting the sudogs that point into it.
+	// The world is stopped, so no mutator can observe or race these
+	// transitions. Stopped goroutines only need the _Gscan ownership bit
+	// that scanstack requires; the preempt-signal machinery of suspendG is
+	// unnecessary because there is nothing running to signal. Any
+	// unexpected status falls back to the full protocol.
 	systemstack(func() {
 		userG := getg().m.curg
 		selfScan := gp == userG && readgstatus(userG) == _Grunning
 		if selfScan {
 			casGToWaitingForSuspendG(userG, _Grunning, waitReasonGarbageCollectionScan)
+			scanstack(gp, gcw)
+			casgstatus(userG, _Gwaiting, _Grunning)
+			return
+		}
+
+		s := readgstatus(gp)
+		if (s == _Gwaiting || s == _Gsyscall) && castogscanstatus(gp, s, s|_Gscan) {
+			gp.preemptStop = false
+			gp.preempt = false
+			gp.stackguard0 = gp.stack.lo + stackGuard
+			scanstack(gp, gcw)
+			casfrom_Gscanstatus(gp, s|_Gscan, s)
+			return
+		}
+		if s == _Gdead || s == _Gdeadextra {
+			return
 		}
 
 		stopped := suspendG(gp)
-		if stopped.dead {
-			return
+		if !stopped.dead {
+			scanstack(gp, gcw)
 		}
-		scanstack(gp, gcw)
 		resumeG(stopped)
-
-		if selfScan {
-			casgstatus(userG, _Gwaiting, _Grunning)
-		}
 	})
 }
 
@@ -698,15 +741,19 @@ func g1gcCollectInboundForSource(s *mspan) {
 
 func g1gcRewriteAllHeap(oldSpanCount int) {
 	if g1UsedInitialized.Load() != 0 {
+		tag := g1ScanTag + 1
+		g1ScanTag = tag
 		for i, count := uint64(0), g1UsedCount.Load(); i < count; i++ {
 			index := g1UsedRegions[i]
 			if g1Regions[index].usedBytes.Load() == 0 {
 				continue
 			}
-			for s := g1RegionSpans[index]; s != nil; s = s.g1next {
-				g1gcRewriteSpan(s)
-			}
+			g1Regions[index].scanTag = tag
 		}
+		g1gcSweepHeapSpans(tag, func(s *mspan, _ uintptr) bool {
+			g1gcRewriteSpan(s)
+			return true
+		})
 	} else {
 		for i := 0; i < oldSpanCount; i++ {
 			g1gcRewriteSpan(mheap_.allspans[i])
@@ -776,6 +823,9 @@ func g1gcClearSourceBits(s *mspan) {
 	// allocated until sweep. The copied live objects are now represented by
 	// the destination span, so only dead source objects belong in totalFree.
 	s.allocCount -= s.g1evacLiveObjects
+	if debug.g1gc != 0 {
+		g1gcRecordSweepFreed(s, uint64(s.g1evacLiveObjects))
+	}
 	s.g1evacLiveObjects = 0
 	for i := uintptr(0); i < divRoundUp(uintptr(s.nelems), 8); i++ {
 		*s.allocBits.bytep(i) = 0

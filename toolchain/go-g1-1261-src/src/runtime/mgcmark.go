@@ -1499,6 +1499,9 @@ func scanblock(b0, n0 uintptr, ptrmask *uint8, gcw *gcWork, stk *stackScanState)
 				// Same work as in scanObject; see comments there.
 				slot := (*uintptr)(unsafe.Pointer(b + i))
 				p := *slot
+				if g1EvacIndexActive != 0 {
+					g1gcMarkRootRegion(p)
+				}
 				if g1gcRewriteActive != 0 {
 					oldp := p
 					p = g1gcForwardPointer(p)
@@ -1591,6 +1594,9 @@ func scanConservative(b, n uintptr, ptrmask *uint8, gcw *gcWork, state *stackSca
 
 		slot := (*uintptr)(unsafe.Pointer(b + i))
 		val := *slot
+		if g1EvacIndexActive != 0 {
+			g1gcMarkRootRegion(val)
+		}
 		if g1gcRewriteActive != 0 {
 			oldval := val
 			val = g1gcForwardPointer(val)

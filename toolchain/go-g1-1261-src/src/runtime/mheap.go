@@ -516,8 +516,6 @@ type mspan struct {
 
 	// G1 keeps a separate forward index of heap spans. This link is metadata-only
 	// and is maintained independently of the mcentral lists.
-	g1next         *mspan
-	g1region       uintptr
 	g1evacPinEpoch uint64
 	g1evacDest     *mspan
 	g1evacNext     *mspan
@@ -1850,8 +1848,6 @@ func (span *mspan) init(base uintptr, npages uintptr) {
 	span.allocBits = nil
 	span.gcmarkBits = nil
 	span.pinnerBits = nil
-	span.g1next = nil
-	span.g1region = 0
 	span.g1evacPinEpoch = 0
 	span.g1evacDest = nil
 	span.g1evacNext = nil

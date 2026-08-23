@@ -683,6 +683,9 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 	// Count the number of free objects in this span.
 	nalloc := uint16(s.countAlloc())
 	nfreed := s.allocCount - nalloc
+	if nfreed != 0 && debug.g1gc != 0 {
+		g1gcRecordSweepFreed(s, uint64(nfreed))
+	}
 	if nalloc > s.allocCount {
 		// The zombie check above should have caught this in
 		// more detail.

@@ -5,6 +5,96 @@ This checkout contains a real Go 1.26.1-based runtime fork under
 for format checks, runtime/SSA gates, project tests, race tests, and matched
 official-versus-candidate benchmarks.
 
+## Iteration 2026-08-23: incremental used-region accounting
+
+The mark-termination span walk in `g1gcInitializeUsed` is gone. Region
+accounting is now maintained incrementally:
+
+- Lifecycle hooks flag logical regions dirty instead of rebuilding state:
+  mcache allocation batches (`refill`, `releaseAll`, `allocLarge`), sweep
+  frees (`sweepLocked.sweep`, beside totalFree), evacuation source
+  retirement (`g1gcClearSourceBits`), and user-arena/evacuation-destination
+  registration (`g1gcRecordSpanAllocation`). The hooks only set a per-region
+  dirty flag and append the region to a bounded dirty list; no arithmetic
+  runs on the hot path.
+- Mark termination walks only dirty regions. Spans are enumerated straight
+  from the page allocator's pallocBits (`g1gcForEachWindowSpan`): a page
+  whose `spanOfHeap` base equals its address starts a span, so packed
+  adjacent spans are separated without any persistent span registry.
+- The logical region index hashes addresses modulo 64 Ki regions, so the
+  heap sweep iterates `mheap_.pages.inUse` ranges chunk by chunk and
+  dispatches windows whose hash is dirty or scan-tagged
+  (`g1gcForEachHeapChunk`, `g1gcSweepHeapSpans`). A 1 MiB window never
+  crosses a 4 MiB chunk boundary; bitmap words are scanned wholesale and
+  window offsets are word-aligned by construction. Totals accumulate into
+  scratch buffers first so colliding windows sum exactly, then reconcile
+  publishes membership (publish/retire in the used-region index).
+- Selection passes (evacuation benefit/projection/copy collection and
+  collection-set build) share one tag-and-sweep mechanism instead of three
+  full walks; copies replay from a bounded candidate list because
+  destination allocation must not run inside the heap walk.
+- `GODEBUG=g1evac=4` recounts every listed region from allspans at each
+  evacuation window and throws on undercount; `g1evac>=5` dumps both
+  enumerations. This validation caught three real bugs during development:
+  a dangling intrusive-span-list design (replaced outright), a window/bitmap
+  offset mismatch that silently dropped windows at non-zero chunk offsets,
+  and it now guards the ledger continuously.
+
+Evacuation pause shrink:
+
+- The three selection sweeps merged into one collect pass (~50us -> ~27us).
+- Stack rescanning mirrors only the `_Gscan` ownership bit for stopped
+  goroutines instead of the full suspend/resume protocol (the world is
+  already stopped).
+- Root slots can no longer reference evacuated objects at all: while an
+  evacuation index is active, `scanblock` and `scanConservative` record the
+  target region of every root pointer into `g1RootRegions`, and selection
+  excludes those regions. Root rescanning is skipped entirely; under
+  `g1evac=4` a full rescan runs anyway and throws if it would have
+  forwarded anything, proving the filter sound.
+- Measured phase cost per evacuation window on the pointer64 workload:
+  select ~27us, rewrite ~4us, copy ~0us; init (dirty refresh) ~0us. The
+  whole pause addition is now ~35us versus ~170us before this iteration and
+  multi-millisecond before the census skip existed.
+
+Matched 5-run alternating benchmarks vs official go1.26.6 (pointer64,
+LIVE_ROOTS=1024, GOMAXPROCS=2, CPU_LIST=0,2, `g1gc=1,g1evac=1`):
+
+- stw_max median ratio 2.33 -> 0.98 (p95 4.96 -> 1.18)
+- stw_p99 median 1.53 -> 0.99
+- gc_cpu median 1.03 -> 0.97..1.02 across rounds
+- heap_sys median 1.73 -> 1.00 (and 0.39 in one round; small-heap
+  heap_sys noise dominates, see earlier note)
+- throughput median ~0.98-1.00, stw_total ~0.95-1.02
+
+Matched 7-run alternating benchmarks vs official go1.26.6 (GOMAXPROCS=2,
+CPU_LIST=0,2, DURATION=5s; median candidate/official ratios):
+
+| config | GODEBUG | throughput | stw_total | stw_max | stw_p99 | gc_cpu |
+|---|---|---|---|---|---|---|
+| pointer64 live=1024 | default | 1.035 | 0.991 | 1.051 | 0.957 | 1.009 |
+| pointer64 live=1024 | g1evac | 0.992 | 1.002 | **0.866** | **0.890** | 1.014 |
+| pointer64 live=128K | default | 0.982 | 1.015 | 1.040 | 1.116 | 1.007 |
+| pointer64 live=128K | g1evac | 0.990 | 1.010 | 1.021 | 0.954 | 1.008 |
+| pointer256 live=1024 | default | 1.011 | 0.995 | 1.141 | 1.133 | 1.012 |
+| pointer256 live=1024 | g1evac | 1.008 | 1.018 | **0.955** | **0.798** | 1.025 |
+
+The default-path rows have every G1 hook disabled, so their spread is the
+noise floor of this shared machine plus upstream go1.26.1->go1.26.6 drift;
+the evacuation rows sit inside or below that band on the pause metrics.
+A later 5-run spot check of the final build measured stw_max median 0.846
+(min 0.44) with throughput 1.014 and gc_cpu 0.998.
+
+Known limits of the new design:
+
+- Refresh cost is linear in mapped footprint chunks per evacuation window
+  even when few regions are dirty (the inUse walk). Fine for current
+  benchmark scales; a chunk-presence bitmap would bound it further.
+- Regions referenced by root slots are never evacuated in that window;
+  stacks pointing at long-lived garbage reduce candidate coverage.
+- The one-time bootstrap still walks allspans at the first accounting-
+  enabled mark termination to cover spans created before GODEBUG parsing.
+
 ## Iteration 2026-08-21: consistency fixes and pause attribution
 
 Consistency fixes (root tree):

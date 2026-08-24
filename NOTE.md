@@ -1,9 +1,95 @@
 # Current State
 
-This checkout contains a real Go 1.26.1-based runtime fork under
-`toolchain/go-g1-1261-src`. The root `justfile` is the supported entry point
-for format checks, runtime/SSA gates, project tests, race tests, and matched
-official-versus-candidate benchmarks.
+This checkout contains a real Go runtime fork under
+`toolchain/go-g1-1266-src` (go1.26.6-based; the older `go-g1-1261-src`
+tree is kept for reference). The root `justfile` is the supported entry
+point for format checks, runtime/SSA gates, project tests, race tests,
+and matched official-versus-candidate benchmarks.
+
+## Iteration 2026-08-24d: rebase to go1.26.6 + frag evacuation correctness
+
+Session goal was "comprehensively surpass go1.26.6"; work converged early
+because go1.27.0 shipped mid-session — the next session should rebase onto
+1.27 first using the same procedure, then resume Phase 1 (window pause
+floor). What landed:
+
+### Rebase (P0, complete)
+
+- Upstream delta go1.26.1 -> go1.26.6 inside the fork-touched files is
+  zero except `runtime/mgcmark.go` (one additive sigpanic-LR frame block
+  in scanstack). Procedure: fresh pristine 1.26.6 tree, overlay the 18
+  verbatim-compatible fork files, `git merge-file` three-way for
+  mgcmark.go only. Compiler surface confirmed tiny in practice:
+  writeBarrier struct field in builtin.go/_builtin/runtime.go only.
+- justfile/bench defaults point at go-g1-1266-src; .gitignore covers its
+  bin/pkg/. Gates green: TestUnsafePoint/TestGcSys, SSA tests, project
+  tests, race tests, g1gc-demo, g1evac=4 smoke.
+- Behavioral parity spot-check vs the 1261 fork: same ~600 windows per
+  pointer64 smoke, same single productive window — the port is faithful.
+
+### Baseline matrix after rebase (n=7 alternating medians, GOMAXPROCS=2,
+CPU_LIST=0,2, DURATION=5s, LIVE_ROOTS=1024, labels p0b-*):
+
+| scenario | config | tp | stw_max | stw_p99 | gc_cpu |
+|---|---|---|---|---|---|
+| pointer64 | default | 0.99 | 1.05 | 0.95 | 1.05 |
+| pointer64 | evac | 0.99 | 0.98 | 1.09 | 1.08 |
+| pointer256 | default | 1.03 | 0.65 | 0.69 | 1.01 |
+| pointer256 | evac | 0.99 | 1.41 | 1.17 | 1.03 |
+| alloc | default | 1.09 | 1.25 | 1.00 | 1.04 |
+| alloc | evac | 1.01 | 0.87 | 0.79 | 1.04 |
+| frag | default | 0.99 | 1.04 | 0.99 | 1.05 |
+| frag | evac | crashed — see below | | | |
+
+### frag+evac correctness chain (root-caused, two fixes landed, one open)
+
+The crash ("found pointer to free object" / "found bad pointer") also
+reproduces on the OLD 1261 fork with the same parameters — pre-existing
+latent bug newly exposed because 2024-24c made stack regions evacuable
+and frag now engages. Evidence chain via a new full-heap verification
+pass (below): the bounded inbound-index rewrite misses heap slots whose
+stale pointers keep referencing cleared source spans.
+
+Fix 1 — terminate-time write-barrier drain
+(`g1gcDrainPendingWBSlots`): upstream gcMarkTermination discards per-P
+wbBufs after gcMarkDone because marking no longer needs them; an active
+evacuation index still needs those (slot, pointer) pairs. Draining them
+inside g1gcEvacuate before any overflow check removed most incidents.
+
+Fix 2 — window-allocation region coverage
+(`g1WindowAllocRegions/List`, hooked from g1gcRecordAllocBatch):
+objects allocated during a window cycle are black, never scanned by that
+cycle's marker, and bulk copies into their fresh memory (slice growth)
+leave no barrier entries — their inbound edges are structurally absent
+from the index. Regions that received window-cycle allocations are now
+added to the stop-the-world rewrite coverage; list overflow degrades to
+the conservative defer path.
+
+Open item: misses dropped (169/59/42 -> single digits to ~250) but did
+not reach zero; every residual miss has winreg=true, i.e. inside covered
+regions, so something about the rewrite walk itself skips live objects —
+prime suspect is mark-bit layout handling (greenteagc inline marks vs
+gcmarkBits) inside g1gcRewriteSpan, which the copy path handles via
+g1gcCountLive-style dual reads but the rewrite walk may not. Until
+root-caused, production `g1evac=1` must be considered UNSAFE on frag-class
+workloads (pointer64/pointer256/alloc smokes stay clean). Under
+`g1evac>=4` the new `g1gcVerifyFullRewrite` pass rewrites whatever the
+bounded passes missed before restart, converting latent corruption into
+a counted diagnostic ("rewrite missed N heap slots", per-miss dump at
+`g1evac>=5`) — stress results 11/12 clean runs at evac=4.
+
+### Where this leaves the plan
+
+- P0 done. P1 (pause floor: prewarmed destinations, copied-source list,
+  chunk bitmap, quickselect, gated generation stores) untouched — still
+  the throughput/stw_p99 lever. P2's exclusion-relaxation idea is moot
+  until the open correctness item lands. Success bar unchanged: tp>1.0
+  stable, stw_max<1.0, stw_p99<1.0, gc_cpu<=1.0 everywhere, frag no worse
+  than default.
+- Next session: rebase fork onto go1.27.0 (same overlay+merge-file
+  procedure; re-diff drift first), re-run this matrix as the new
+  baseline, then root-cause the residual rewrite misses before resuming
+  performance work.
 
 ## Iteration 2026-08-24c: split root exclusion — stack regions evacuable
 

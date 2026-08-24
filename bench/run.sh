@@ -36,11 +36,23 @@ mkdir -p "$repo_dir/bench/bin" "$result_dir"
 build() {
 	local go_bin=$1
 	local output=$2
+	local attempt
 	# A caller may enable candidate-only runtime diagnostics for the workload.
 	# Keep those settings out of toolchain compilation, where the compiler itself
 	# is a runtime workload and evacuation is not supported during the build.
-	env -u GODEBUG GOROOT="$(dirname "$(dirname "$go_bin")")" "$go_bin" \
-		build -trimpath -o "$output" "$repo_dir/bench/workload"
+	# Toolchain executables occasionally fail to spawn right after a fresh
+	# make.bash install on some filesystems, so retry a few times.
+	for attempt in 1 2 3 4; do
+		if env -u GODEBUG GOROOT="$(dirname "$(dirname "$go_bin")")" "$go_bin" \
+			build -trimpath -o "$output" "$repo_dir/bench/workload"; then
+			return 0
+		fi
+		for tool in "$(dirname "$(dirname "$go_bin")")"/pkg/tool/linux_amd64/*; do
+			cat "$tool" >/dev/null 2>&1 || true
+		done
+		sleep $((attempt * 5))
+	done
+	return 1
 }
 
 run_one() {

@@ -44,9 +44,9 @@ const g1EvacuationCopyBudget = 1 << 20
 // retained heap so large heaps do not pay a full-heap rewrite every few
 // cycles.
 func g1gcEvacThreshold() uint64 {
-	const minThreshold = 4 << 30
+	const minThreshold = 2 << 30
 	live := gcController.heapLive.Load()
-	scaled := live * 16
+	scaled := live * 8
 	if scaled < minThreshold {
 		return minThreshold
 	}
@@ -181,6 +181,24 @@ func g1gcEvacEligible(s *mspan, epoch uint64) (uint64, uint64, bool) {
 		return 0, 0, false
 	}
 	return liveObjects, liveBytes, true
+}
+
+// g1gcEvacEligibleCheap is the selection-time filter without the per-span
+// mark-bit census. The census runs later, on the handful of spans that end
+// up copied, so a large low-live set costs scanning proportional to the
+// copy budget rather than to the heap.
+func g1gcEvacEligibleCheap(s *mspan, epoch uint64) bool {
+	if s == nil || s.state.get() != mSpanInUse || s.g1evacDest != nil {
+		return false
+	}
+	if s.isUserArenaChunk || s.spanclass == tinySpanClass || s.specials != nil || s.pinnerBits != nil || s.g1evacPinEpoch == epoch {
+		return false
+	}
+	if s.allocCount == 0 || s.elemsize == 0 || s.sweepgen != mheap_.sweepgen {
+		return false
+	}
+	region := &g1Regions[g1gcRegionIndex(s.base())]
+	return region.generation.Load() == epoch<<1 && region.liveBytes.Load()*2 < region.usedBytes.Load()
 }
 
 // Runtime scheduler objects have ordinary heap type information, but the
@@ -339,8 +357,23 @@ func g1gcDiscardProjectedSet() {
 func g1gcTagLowLiveRegions() uint32 {
 	tag := g1ScanTag + 1
 	g1ScanTag = tag
-	for i := uint64(0); i < g1LowLiveCount; i++ {
-		g1Regions[g1LowLiveRegions[i]].scanTag = tag
+	// Bound the sweep by the copy budget rather than by heap size: tag
+	// low-live regions until their used bytes cover a multiple of the
+	// budget. Regions referenced by root slots are skipped outright so the
+	// pause never has to rewrite root slots.
+	remaining := uintptr(8) << 20
+	for i := uint64(0); i < g1LowLiveCount && remaining != 0; i++ {
+		index := g1LowLiveRegions[i]
+		if g1RootRegions[index/8]>>(index&7)&1 != 0 {
+			continue
+		}
+		g1Regions[index].scanTag = tag
+		used := g1Regions[index].usedBytes.Load()
+		if used >= uint64(remaining) {
+			remaining = 0
+		} else {
+			remaining -= uintptr(used)
+		}
 	}
 	return tag
 }
@@ -434,14 +467,7 @@ func g1gcEvacuate() {
 		if budgetRemaining == 0 || candidateSpans == len(g1EvacCandidates) {
 			return false
 		}
-		liveObjects, liveBytes, ok := g1gcEvacEligible(s, epoch)
-		if !ok {
-			return true
-		}
-		// Regions that any root slot referenced during marking stay put so
-		// the pause never has to rewrite root slots.
-		index := g1gcRegionIndex(s.base())
-		if g1RootRegions[index/8]>>(index&7)&1 != 0 {
+		if !g1gcEvacEligibleCheap(s, epoch) {
 			return true
 		}
 		spanBytes := uint64(s.npages) * uint64(pageSize)
@@ -449,14 +475,23 @@ func g1gcEvacuate() {
 			return true
 		}
 		budgetRemaining -= spanBytes
-		selectedLiveBytes += liveBytes
-		projectedObjects += liveObjects
 		g1gcCollectInboundForSource(s)
 		g1EvacCandidates[candidateSpans] = s
-		g1EvacCandidateLive[candidateSpans] = liveObjects
 		candidateSpans++
 		return true
 	})
+	for c := 0; c < candidateSpans; c++ {
+		liveObjects, liveBytes, ok := g1gcEvacEligible(g1EvacCandidates[c], epoch)
+		if !ok {
+			// The cheap filter accepted it but the exact census disagrees;
+			// drop it from the copy list.
+			g1EvacCandidates[c] = nil
+			continue
+		}
+		selectedLiveBytes += liveBytes
+		projectedObjects += liveObjects
+		g1EvacCandidateLive[c] = liveObjects
+	}
 	if selectedLiveBytes < minLiveBytes {
 		g1gcDiscardProjectedSet()
 		for c := 0; c < candidateSpans; c++ {
@@ -484,6 +519,9 @@ func g1gcEvacuate() {
 	for c := 0; c < candidateSpans; c++ {
 		s := g1EvacCandidates[c]
 		g1EvacCandidates[c] = nil
+		if s == nil {
+			continue
+		}
 		liveObjects := g1EvacCandidateLive[c]
 		dst := g1gcAllocEvacDestination(s)
 		if dst == nil {

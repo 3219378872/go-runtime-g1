@@ -5,6 +5,39 @@ This checkout contains a real Go 1.26.1-based runtime fork under
 for format checks, runtime/SSA gates, project tests, race tests, and matched
 official-versus-candidate benchmarks.
 
+## Iteration 2026-08-24: evacuation frequency and bounded selection
+
+Throughput follow-up to the dirty-region rework:
+
+- Evacuation windows trigger twice as often: the allocation threshold is
+  max(2 GiB, 8x heapLive), down from max(4 GiB, 16x). Per-window cost is
+  unchanged (copy budget stays at 1 MiB), so compaction rate doubles while
+  the pause distribution keeps its shape.
+- Selection tagging is now bounded by the copy budget instead of heap size:
+  `g1gcTagLowLiveRegions` tags low-live regions until their used bytes cover
+  8 MiB, skipping root-referenced regions. At LIVE_ROOTS=131072 this cut the
+  selection sweep from ~724us to ~40us per window and removed a 3.8x
+  stw_max regression.
+- The per-span mark-bit census moved out of the selection sweep; only the
+  handful of collected candidates are censused exactly before copying
+  (`g1gcEvacEligibleCheap` filters, `g1gcEvacEligible` verifies).
+- An experiment that also built a collection set for every window cycle and
+  let the sweeper consume it unconditionally showed no throughput benefit
+  on this workload and extra variance; it was reverted.
+- `bench/run.sh` retries toolchain builds: freshly installed pkg/tool
+  binaries intermittently fail to exec on this WSL host (the same flake can
+  hit make.bash itself), so builds now retry with backoff.
+
+Same-window paired medians vs official go1.26.6 (n=7, DURATION=5s,
+GOMAXPROCS=2): pointer64 evac tp 1.008 / pointer64 live=128K evac tp 0.959 /
+pointer256 evac tp 1.021 / fork-default tp 0.984, with stw_max 0.80-1.05 and
+stw_p99 0.90-1.02 across the same runs. Across all windows measured today
+the evacuation configuration lands between -4% and +2% throughput versus
+official: parity within machine drift, not a stable win. The reliable wins
+remain tail latency (stw_max/stw_p99) and GC-side costs; making throughput
+exceed upstream will need compaction benefits to show up as mutator-visible
+locality, which this uniform-churn synthetic workload does not reward.
+
 ## Iteration 2026-08-23: incremental used-region accounting
 
 The mark-termination span walk in `g1gcInitializeUsed` is gone. Region

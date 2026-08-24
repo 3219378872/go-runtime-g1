@@ -3,6 +3,8 @@ toolchain/go-g1-src/bin/
 toolchain/go-g1-src/pkg/
 toolchain/go-g1-1261-src/bin/
 toolchain/go-g1-1261-src/pkg/
+toolchain/go-g1-1266-src/bin/
+toolchain/go-g1-1266-src/pkg/
 toolchain/go-greentea-src/
 
 # Generated benchmark binaries, traces, profiles, and summaries.
@@ -18,3 +20,4 @@ coverage.html
 .idea/
 .vscode/
 toolchain/go-g1-1261-src/.config/
+toolchain/go-g1-1266-src/.config/

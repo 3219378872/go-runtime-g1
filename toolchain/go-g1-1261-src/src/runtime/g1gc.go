@@ -177,12 +177,14 @@ var g1CandidateSpans [g1CandidateSpanLimit]*mspan
 var g1CandidateCount atomic.Uint64
 var g1CandidateNext atomic.Uint64
 
-// g1RootRegions records, per logical region, whether any root slot (stacks,
-// globals, finalizer bookkeeping, conservative scans) held a pointer into it
-// while marking ran during an evacuation-window cycle. Selection excludes
-// such regions outright, which lets the evacuation pause skip root rewriting
-// entirely: no root slot can reference a moved object.
-var g1RootRegions [g1RegionCount / 8]byte
+// g1GlobalRootRegions records, per logical region, whether a non-stack root
+// (data/BSS globals, the finalizer and cleanup queues, span specials, or
+// mutator-time special registration) held a pointer into it while marking ran
+// during an evacuation-window cycle. Stack-derived targets are deliberately
+// absent: scanblock's stk parameter distinguishes them, and stack slots are
+// rewritten by the stop-the-world rescan instead. Selection excludes only the
+// regions listed here.
+var g1GlobalRootRegions [g1RegionCount / 8]byte
 
 // g1DebugForwardCount counts pointer rewrites performed by
 // g1gcForwardPointer. Stop-the-world diagnostic state used by the g1evac=4
@@ -200,7 +202,7 @@ func g1gcMarkRootRegion(p uintptr) {
 		return
 	}
 	index := (p >> g1RegionShift) & (g1RegionCount - 1)
-	g1RootRegions[index/8] |= 1 << (index & 7)
+	g1GlobalRootRegions[index/8] |= 1 << (index & 7)
 }
 
 // g1gcSetEvacIndexActive publishes the evacuation-index state both to the
@@ -263,7 +265,7 @@ func g1gcStartCycle() {
 		if allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1gcEvacThreshold() && epoch-g1EvacLastWindowEpoch >= g1EvacMinCycleGap {
 			g1gcResetInbound()
 			g1gcResetWBSlots()
-			clear(g1RootRegions[:])
+			clear(g1GlobalRootRegions[:])
 			// Re-base the incremental live totals for this window's marking
 			// cycle so its mark termination can skip the mark-bit census.
 			g1gcResetLiveCounts()
@@ -337,6 +339,9 @@ func g1gcAppendInboundActive(owner *mspan, targetRegion uintptr) {
 	pp := getg().m.p.ptr()
 	if uint32(pp.id) >= uint32(len(g1EdgeTables)) {
 		g1InboundOverflow.Store(1)
+		return
+	}
+	if !g1RegionSticky(targetRegion) {
 		return
 	}
 	h := uintptr(unsafe.Pointer(owner))>>4 ^ targetRegion
@@ -704,7 +709,7 @@ func g1gcInitializeUsed() {
 		clear(g1StickyRegions[:])
 		for i := uint64(0); i < count; i++ {
 			index := g1LowLiveRegions[i]
-			if g1RootRegions[index/8]>>(index&7)&1 != 0 {
+			if g1GlobalRootRegions[index/8]>>(index&7)&1 != 0 {
 				continue
 			}
 			g1StickyRegions[index/64] |= 1 << (index % 64)
@@ -1091,5 +1096,9 @@ func g1gcTrace() {
 		" rewrite-spans ", g1LastRewriteSpans,
 		" inbound-edges ", g1InboundSpanCount.Load(),
 		" inbound-record-us ", g1EvacRecordNs.Load()/1e3,
-		" inbound-overflow ", g1InboundOverflow.Load())
+		" inbound-overflow ", g1InboundOverflow.Load(),
+		" dbg-cands ", g1DbgCands.Load(), " dbg-nilcens ", g1DbgNilCens.Load(),
+		" dbg-dstnil ", g1DbgDstNil.Load(), " dbg-sellive ", g1DbgSelLive.Load(),
+		" dbg-minlive ", g1DbgMinLive.Load(), " dbg-lowlive ", g1DbgLowLive.Load(),
+		" dbg-tagged ", g1DbgTagged.Load())
 }

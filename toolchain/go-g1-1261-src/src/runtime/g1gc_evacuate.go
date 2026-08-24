@@ -29,13 +29,13 @@ const (
 // scales with live objects rather than spans.
 const (
 	g1EvacuationMaxRewriteSpans  = 512
-	g1EvacuationMaxRewriteObject = 16 << 10
+	g1EvacuationMaxRewriteObject = 64 << 10
 )
 
 // Evacuation pauses scale with the copied byte budget through the destination
 // slot walk, so keep the per-window copy small enough for the pause to stay
 // near ordinary mark termination.
-const g1EvacuationCopyBudget = 1 << 20
+const g1EvacuationCopyBudget = 256 << 10
 
 // Full-heap rewriting is deliberately throttled. A cycle still computes the
 // live-region policy every time, but moving objects only when enough elapsed
@@ -61,6 +61,17 @@ var g1EvacRegionEpoch [g1RegionCount]uint64
 var g1EvacEpoch uint64
 
 var g1EvacLastAlloc uint64
+
+// Last-window selection diagnostics for g1trace.
+var (
+	g1DbgCands   atomic.Int64
+	g1DbgNilCens atomic.Int64
+	g1DbgDstNil  atomic.Int64
+	g1DbgSelLive atomic.Int64
+	g1DbgMinLive atomic.Int64
+	g1DbgLowLive atomic.Int64
+	g1DbgTagged  atomic.Int64
+)
 
 // g1EvacLastWindowEpoch and g1EvacMinCycleGap rate-limit evacuation windows
 // in GC cycles as well as bytes, so allocation-rate-heavy heaps cannot turn
@@ -182,9 +193,13 @@ func g1gcEvacEligible(s *mspan, epoch uint64) (uint64, uint64, bool) {
 	if used == 0 || live*2 >= used {
 		return 0, 0, false
 	}
+	// No per-span density rejection here: marks include allocate-black
+	// objects from this cycle, so a freshly written span always reads as
+	// dense. The region-level totals above carry the survived-from-before
+	// signal; copying some floating garbage is safe and capped by the byte
+	// budget.
 	liveObjects, liveBytes := g1gcCountLive(s)
-	spanUsed := uint64(s.allocCount) * uint64(s.elemsize)
-	if liveObjects == 0 || liveBytes*2 >= spanUsed {
+	if liveObjects == 0 {
 		return 0, 0, false
 	}
 	return liveObjects, liveBytes, true
@@ -364,24 +379,52 @@ func g1gcDiscardProjectedSet() {
 func g1gcTagLowLiveRegions() uint32 {
 	tag := g1ScanTag + 1
 	g1ScanTag = tag
-	// Bound the sweep by the copy budget rather than by heap size: tag
-	// low-live regions until their used bytes cover a multiple of the
-	// budget. Regions referenced by root slots are skipped outright so the
-	// pause never has to rewrite root slots.
-	remaining := uintptr(8) << 20
-	for i := uint64(0); i < g1LowLiveCount && remaining != 0; i++ {
+	tagged := 0
+	// Greedy by reclaimable bytes: tag sticky, root-free low-live regions in
+	// descending order until their dead bytes cover several copies' worth of
+	// budget. Sorting keeps the stop-the-world sweep proportional to the
+	// byte budget instead of to the size of the low-live set.
+	type entry struct {
+		index   uintptr
+		reclaim uint64
+	}
+	var list [512]entry
+	n := 0
+	for i := uint64(0); i < g1LowLiveCount && n < len(list); i++ {
 		index := g1LowLiveRegions[i]
-		if g1RootRegions[index/8]>>(index&7)&1 != 0 {
+		if !g1RegionSticky(index) {
 			continue
 		}
-		g1Regions[index].scanTag = tag
-		used := g1Regions[index].usedBytes.Load()
-		if used >= uint64(remaining) {
-			remaining = 0
-		} else {
-			remaining -= uintptr(used)
+		if g1GlobalRootRegions[index/8]>>(index&7)&1 != 0 {
+			continue
 		}
+		region := &g1Regions[index]
+		used := region.usedBytes.Load()
+		live := region.liveBytes.Load()
+		if used == 0 || live >= used {
+			continue
+		}
+		list[n] = entry{index, used - live}
+		n++
 	}
+	for i := 1; i < n; i++ {
+		e := list[i]
+		j := i - 1
+		for j >= 0 && list[j].reclaim < e.reclaim {
+			list[j+1] = list[j]
+			j--
+		}
+		list[j+1] = e
+	}
+	const reclaimTarget = uint64(64) << 20
+	var covered uint64
+	for i := 0; i < n && covered < reclaimTarget; i++ {
+		g1Regions[list[i].index].scanTag = tag
+		covered += list[i].reclaim
+		tagged++
+	}
+	g1DbgLowLive.Store(int64(g1LowLiveCount))
+	g1DbgTagged.Store(int64(tagged))
 	return tag
 }
 
@@ -493,12 +536,16 @@ func g1gcEvacuate() {
 			// The cheap filter accepted it but the exact census disagrees;
 			// drop it from the copy list.
 			g1EvacCandidates[c] = nil
+			g1DbgNilCens.Add(1)
 			continue
 		}
 		selectedLiveBytes += liveBytes
 		projectedObjects += liveObjects
 		g1EvacCandidateLive[c] = liveObjects
 	}
+	g1DbgCands.Store(int64(candidateSpans))
+	g1DbgSelLive.Store(int64(selectedLiveBytes))
+	g1DbgMinLive.Store(int64(minLiveBytes))
 	if selectedLiveBytes < minLiveBytes {
 		g1gcDiscardProjectedSet()
 		for c := 0; c < candidateSpans; c++ {
@@ -532,6 +579,7 @@ func g1gcEvacuate() {
 		liveObjects := g1EvacCandidateLive[c]
 		dst := g1gcAllocEvacDestination(s)
 		if dst == nil {
+			g1DbgDstNil.Add(1)
 			continue
 		}
 		if debug.g1evac > 1 {
@@ -576,13 +624,17 @@ func g1gcEvacuate() {
 	}
 
 	g1gcDebugUserArenaState("before-rewrite")
-	// Root slots are guaranteed not to reference evacuated regions (the
-	// selection filter excluded every region the root scanner touched during
-	// marking), so only the bounded heap owner set and the fresh destination
-	// spans need rewriting. Under g1evac=4 a full root rescan runs anyway to
-	// prove that guarantee: any forward it performs means the filter leaked.
+	// Non-stack roots (globals, finalizer/cleanup queues, specials) are
+	// guaranteed not to reference evacuated regions — selection excluded
+	// every region they touched during marking — so their rescans stay
+	// skipped. Stack slots are NOT excluded: the rescan below rewrites any
+	// that point into moved objects, at the measured cost of a plain
+	// stop-the-world scanstack pass. Under g1evac=4 the skipped global
+	// rescan runs anyway and throws if it would have forwarded anything.
 	g1gcRewriteActive = 1
-	forwardBaseline := g1DebugForwardCount
+	stackStart := nanotime()
+	g1gcRescanStacks()
+	g1LastEvacRootsStackNs = nanotime() - stackStart
 	heapStart := nanotime()
 	// Rewrite the bounded owner set that was built and committed before the
 	// copies, then the newly allocated destination spans. Destination objects
@@ -608,10 +660,14 @@ func g1gcEvacuate() {
 	}
 	g1RewriteSpanHead = nil
 	if debug.g1evac >= 4 {
+		// Crosscheck the global exclusion: nothing here may forward. The
+		// baseline starts after the stack rescan, whose forwards are the
+		// expected mechanism this pass replaces.
+		verifyBase := g1DebugForwardCount
 		rootStart := nanotime()
 		g1gcUpdateRoots()
-		if g1DebugForwardCount != forwardBaseline {
-			throw("runtime: G1 root slot referenced an evacuated region")
+		if g1DebugForwardCount != verifyBase {
+			throw("runtime: G1 global root referenced an evacuated region")
 		}
 		g1LastEvacRootsNs = nanotime() - rootStart
 	}
@@ -670,6 +726,11 @@ func g1gcHasSpanSpecials() bool {
 	return false
 }
 
+// g1gcUpdateRoots rescans the non-stack roots: fixed finalizer and cleanup
+// queues, data/BSS globals, and span specials. It exists for the g1evac>=4
+// crosscheck only — selection excludes every region these roots reference,
+// so a production pause skips this pass entirely, and any pointer it
+// forwards proves the exclusion bitmap leaked.
 func g1gcUpdateRoots() {
 	gcw := &getg().m.p.ptr().gcw
 	rootStart := nanotime()
@@ -685,6 +746,14 @@ func g1gcUpdateRoots() {
 		}
 	}
 	g1LastEvacRootsMarkNs = nanotime() - rootStart
+}
+
+// g1gcRescanStacks rewrites stack slots that point into evacuated regions.
+// Stack targets are not part of the exclusion bitmap, so every evacuation
+// pause pays this pass; the world is stopped and scanstack is driven with
+// the lightweight _Gscan ownership protocol instead of preempt signals.
+func g1gcRescanStacks() {
+	gcw := &getg().m.p.ptr().gcw
 	stackStart := nanotime()
 	for _, gp := range allGsSnapshot() {
 		g1gcRewriteStack(gp, gcw)

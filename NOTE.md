@@ -5,6 +5,47 @@ This checkout contains a real Go 1.26.1-based runtime fork under
 for format checks, runtime/SSA gates, project tests, race tests, and matched
 official-versus-candidate benchmarks.
 
+## Iteration 2026-08-24c: split root exclusion — stack regions evacuable
+
+The root-region exclusion bitmap is now global-only. `scanblock`'s `stk`
+parameter already discriminates root kinds (nil for globals, finalizer and
+cleanup queues, span specials, and mutator-time special registration; non-nil
+for everything stack-derived), so recording narrowed to `stk == nil` calls,
+and `scanConservative` dropped its recording hook entirely (every caller is
+stack-derived). Stack targets stopped being recorded, which also removes a
+spanOfHeap per stack pointer from the marking hot path.
+
+At the evacuation pause, `g1gcRescanStacks` runs unconditionally: scanstack
+driven with the lightweight `_Gscan` protocol rewrites any stack slot that
+points into a moved object (~36us measured). The global rescan
+(`g1gcUpdateRoots`) stays skipped in production; under `g1evac=4` it runs
+after the stack pass with its own forward-count baseline and throws if a
+global root referenced an evacuated region.
+
+Selection tagging is greedy by reclaimable bytes (descending, until dead
+bytes cover 4 MiB ≈ several copy budgets), which keeps the sweep proportional
+to the budget instead of the low-live set. Noscan source spans are eligible
+again — they carry no outbound pointers, so copying them relieves
+fragmentation at zero rewrite cost, and their dest spans are skipped by the
+rescan pass. Copy budget reduced to 256 KiB to bound window pauses on
+allocation-heavy heaps.
+
+Results:
+
+- pointer64 evac vs official go1.26.6 (same window, n=7): tp 1.021,
+  stw_max 0.889, stw_p99 1.092, gc_cpu 1.004 — evacuation now beats the
+  fork's own default path measured adjacently (default tp 0.986).
+- frag evac engages for the first time on this workload (82 spans / 546 KB
+  moved in one observed window; stack rescan forwards zero because the live
+  set is reached through the heap-internal roots slice, whose edges the
+  inbound index rewrites). Same-window tp 1.010.
+- frag tail latency remains an open boundary: stw_max ~3.5x persists because
+  a window's fixed costs (selection over top-reclaim regions, destination
+  allocation, owner rewriting) floor around a millisecond on a 400 MB churn
+  heap regardless of the 256 KiB byte budget. Next lever is cheaper window
+  mechanics (pre-warmed destinations, span-sampled selection), not smaller
+  budgets.
+
 ## Iteration 2026-08-24b: fragmentation workload and candidate gating
 
 - New `frag` bench scenario: payload sizes cycle through 24B/264B/3KB/40KB

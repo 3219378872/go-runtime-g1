@@ -1499,7 +1499,12 @@ func scanblock(b0, n0 uintptr, ptrmask *uint8, gcw *gcWork, stk *stackScanState)
 				// Same work as in scanObject; see comments there.
 				slot := (*uintptr)(unsafe.Pointer(b + i))
 				p := *slot
-				if g1EvacIndexActive != 0 {
+				// A nil stk identifies root scans of globals, finalizers,
+				// cleanups, and specials; those regions are excluded from
+				// evacuation so the pause never has to rewrite them. Stack
+				// slots (stk != nil) are rewritten by the stop-the-world
+				// stack rescan instead and must not narrow candidates.
+				if g1EvacIndexActive != 0 && stk == nil {
 					g1gcMarkRootRegion(p)
 				}
 				if g1gcRewriteActive != 0 {
@@ -1594,9 +1599,10 @@ func scanConservative(b, n uintptr, ptrmask *uint8, gcw *gcWork, state *stackSca
 
 		slot := (*uintptr)(unsafe.Pointer(b + i))
 		val := *slot
-		if g1EvacIndexActive != 0 {
-			g1gcMarkRootRegion(val)
-		}
+		// Every scanConservative call site is stack-derived (stack objects,
+		// asyncPreempt and debug-call frames, conservative args), so these
+		// targets are handled by the stop-the-world stack rescan rather than
+		// by region exclusion.
 		if g1gcRewriteActive != 0 {
 			oldval := val
 			val = g1gcForwardPointer(val)

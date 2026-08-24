@@ -3,7 +3,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 bootstrap_root := env_var_or_default("GOROOT_BOOTSTRAP", "/usr/local/go")
 # Keep this absolute: a relative GOROOT breaks tool resolution once the go
 # command changes working directory mid-build.
-candidate_root := env_var_or_default("CANDIDATE_ROOT", justfile_directory() / "toolchain/go-g1-1261-src")
+candidate_root := env_var_or_default("CANDIDATE_ROOT", justfile_directory() / "toolchain/go-g1-1266-src")
 candidate_go := candidate_root + "/bin/go"
 g1gc_godebug := env_var_or_default("GODEBUG_VALUE", env_var_or_default("G1GC_GODEBUG", "gctrace=1,g1gc=1"))
 g1gcset_godebug := env_var_or_default("GODEBUG_VALUE", env_var_or_default("G1GCSET_GODEBUG", "gctrace=1,g1gc=1,g1gcset=1"))
@@ -17,7 +17,7 @@ summary_label := env_var_or_default("LABEL", "collection-set")
 smoke_duration := env_var_or_default("SMOKE_DURATION", "1s")
 
 project_go_files := "collect.go g1gc_test.go heap.go mark.go policy.go region.go types.go validate.go cmd/g1gc-demo/main.go bench/compare/main.go bench/workload/main.go"
-fork_go_files := "toolchain/go-g1-1261-src/src/runtime/mheap.go toolchain/go-g1-1261-src/src/runtime/mgcmark.go toolchain/go-g1-1261-src/src/runtime/mgcmark_greenteagc.go toolchain/go-g1-1261-src/src/runtime/mwbbuf.go toolchain/go-g1-1261-src/src/runtime/mbitmap.go toolchain/go-g1-1261-src/src/runtime/atomic_pointer.go toolchain/go-g1-1261-src/src/runtime/g1gc.go toolchain/go-g1-1261-src/src/runtime/g1gc_evacuate.go toolchain/go-g1-1261-src/src/cmd/compile/internal/ssa/writebarrier.go toolchain/go-g1-1261-src/src/cmd/compile/internal/liveness/plive.go"
+fork_go_files := "toolchain/go-g1-1266-src/src/runtime/mheap.go toolchain/go-g1-1266-src/src/runtime/mgcmark.go toolchain/go-g1-1266-src/src/runtime/mgcmark_greenteagc.go toolchain/go-g1-1266-src/src/runtime/mwbbuf.go toolchain/go-g1-1266-src/src/runtime/mbitmap.go toolchain/go-g1-1266-src/src/runtime/atomic_pointer.go toolchain/go-g1-1266-src/src/runtime/g1gc.go toolchain/go-g1-1266-src/src/runtime/g1gc_evacuate.go toolchain/go-g1-1266-src/src/cmd/compile/internal/ssa/writebarrier.go toolchain/go-g1-1266-src/src/cmd/compile/internal/liveness/plive.go"
 
 default: verify
 

@@ -62,6 +62,13 @@ var g1EvacEpoch uint64
 
 var g1EvacLastAlloc uint64
 
+// g1EvacLastWindowEpoch and g1EvacMinCycleGap rate-limit evacuation windows
+// in GC cycles as well as bytes, so allocation-rate-heavy heaps cannot turn
+// every collection into a window. Written only while the world is stopped.
+var g1EvacLastWindowEpoch uint64
+
+const g1EvacMinCycleGap = 32
+
 // The phase timings are diagnostic data emitted with gctrace. They are plain
 // fields because evacuation and trace emission are both stop-the-world.
 var (

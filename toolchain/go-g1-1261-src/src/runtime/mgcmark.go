@@ -1790,7 +1790,11 @@ func gcmarknewobject(span *mspan, obj uintptr) {
 	// Mark object.
 	objIndex := span.objIndex(obj)
 	span.markBitsForIndex(objIndex).setMarked()
-	g1gcRecordLiveObject(span)
+	// Objects allocated during the window are deliberately not charged to
+	// the region live totals: selection wants the survived-from-before
+	// population, and counting allocate-black churn makes every span in a
+	// high-allocation-rate heap read as fully live. The exact census at
+	// evacuation time still sees these marks, so eligibility stays honest.
 	if goexperiment.GreenTeaGC && gcUsesSpanInlineMarkBits(span.elemsize) {
 		// No need to scan the new object.
 		span.scannedBitsForIndex(objIndex).setMarked()

@@ -5,6 +5,36 @@ This checkout contains a real Go 1.26.1-based runtime fork under
 for format checks, runtime/SSA gates, project tests, race tests, and matched
 official-versus-candidate benchmarks.
 
+## Iteration 2026-08-24b: fragmentation workload and candidate gating
+
+- New `frag` bench scenario: payload sizes cycle through 24B/264B/3KB/40KB
+  (the last crosses into the large-object path) and once every 50k
+  operations each worker migrates a contiguous quarter of its live set,
+  abandoning sparse survivors behind. This is the fragmentation pressure a
+  compacting collector targets.
+- Evacuation windows are now also rate-limited in cycles:
+  `epoch - g1EvacLastWindowEpoch >= 32`. High-allocation-rate heaps cross
+  any byte threshold constantly, and unbounded window density showed up as
+  gc_cpu 1.28x and stw_max 3.6x on frag.
+- Inbound-edge indexing gained a sticky candidate gate (`g1StickyRegions`):
+  the marker records edges only for target regions that looked like
+  candidates in the previous window, so recording cost tracks the candidate
+  set instead of the whole heap. Selection only picks regions that are both
+  low-live and sticky, which keeps every selected source's edges fully
+  indexed; non-sticky regions join the sticky set after one observed window.
+- Result on frag: evacuation declines to engage (root slots reference most
+  regions, and the sticky intersection stays empty), so it runs at parity
+  with a large stw_max ratio from ordinary mark-term variance plus window
+  taxes on the few armed windows. This documents a real boundary rather
+  than a regression: root-region exclusion trades evacuation coverage for
+  the pause wins on pointer workloads, and a heap whose live set is
+  continuously referenced from stacks everywhere cannot be evacuated under
+  that design without reintroducing root rescanning. The frag scenario
+  stays as the stress case for future designs (per-G remembered sets).
+- justfile now passes an absolute CANDIDATE_ROOT; a relative GOROOT breaks
+  tool resolution when the go command changes working directory mid-build,
+  which intermittently surfaced as fork/exec ENOENT bursts after make.bash.
+
 ## Iteration 2026-08-24: evacuation frequency and bounded selection
 
 Throughput follow-up to the dirty-region rework:

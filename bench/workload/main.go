@@ -24,6 +24,14 @@ type node256 struct {
 	data [232]byte
 }
 
+// fragNode mixes size classes on purpose: payload cycles through tiny, mid,
+// and multi-kilobyte lengths (the largest crosses into the large-object
+// path), so the heap interleaves many span sizes inside the same regions.
+type fragNode struct {
+	next    *fragNode
+	payload []byte
+}
+
 type result struct {
 	Runtime             string  `json:"runtime"`
 	Scenario            string  `json:"scenario"`
@@ -60,7 +68,7 @@ type config struct {
 
 func main() {
 	cfg := config{}
-	flag.StringVar(&cfg.scenario, "scenario", "pointer64", "pointer64, pointer256, or alloc")
+	flag.StringVar(&cfg.scenario, "scenario", "pointer64", "pointer64, pointer256, alloc, or frag")
 	flag.DurationVar(&cfg.duration, "duration", 5*time.Second, "workload duration")
 	flag.IntVar(&cfg.workers, "workers", 1, "mutator worker count")
 	flag.IntVar(&cfg.live, "live", 1024, "live roots per pointer worker")
@@ -98,6 +106,12 @@ func main() {
 				ready <- struct{}{}
 				<-start
 				runAlloc(cfg.size, cfg.batch, id, stop, &operations)
+			case "frag":
+				roots := makeFrag(cfg.live, id)
+				ready <- struct{}{}
+				<-start
+				runFrag(roots, cfg.batch, id, stop, &operations)
+				runtime.KeepAlive(roots)
 			default:
 				fatal("unknown scenario: " + cfg.scenario)
 			}
@@ -249,6 +263,68 @@ func runAlloc(size, batch, worker int, stop <-chan struct{}, operations *atomic.
 			seed++
 			runtime.KeepAlive(buf)
 			operations.Add(1)
+		}
+	}
+}
+
+// fragPayloadSizes mixes size classes so consecutive replacements allocate
+// from small spans, mid spans, and the large-object path in turn.
+var fragPayloadSizes = [4]int{24, 264, 3072, 40 * 1024}
+
+func makeFrag(n, worker int) []*fragNode {
+	roots := make([]*fragNode, n)
+	seed := uint64(worker + 13)
+	for i := range roots {
+		seed = seed*6364136223846793005 + 1442695040888963407
+		size := fragPayloadSizes[seed%uint64(len(fragPayloadSizes))]
+		payload := make([]byte, size)
+		payload[0] = byte(seed)
+		roots[i] = &fragNode{payload: payload}
+	}
+	return roots
+}
+
+// runFrag replaces random slots with fresh nodes (churn) and, once every
+// fragEpoch operations, migrates a contiguous quarter of the live set: the
+// old band dies while its replacement is allocated at the allocation
+// frontier. The abandoned band leaves sparse survivors behind, which is the
+// fragmentation pressure a compacting collector is supposed to relieve.
+func runFrag(roots []*fragNode, batch, worker int, stop <-chan struct{}, operations *atomic.Uint64) {
+	const epoch = 50000
+	seed := uint64(worker*1000003 + 31)
+	untilMigration := epoch
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		for i := 0; i < batch; i++ {
+			seed = seed*2862933555777941757 + 3037000493
+			idx := int(seed % uint64(len(roots)))
+			old := roots[idx]
+			size := fragPayloadSizes[(seed>>13)%uint64(len(fragPayloadSizes))]
+			payload := make([]byte, size)
+			payload[0] = byte(seed)
+			roots[idx] = &fragNode{next: old.next, payload: payload}
+			if old.payload != nil {
+				payload[len(payload)-1] = old.payload[0]
+			}
+			operations.Add(1)
+			untilMigration--
+			if untilMigration == 0 {
+				untilMigration = epoch
+				start := int((seed >> 29) % uint64(len(roots)))
+				band := len(roots) / 4
+				for k := 0; k < band; k++ {
+					j := (start + k) % len(roots)
+					psize := fragPayloadSizes[uint64(k+worker)%uint64(len(fragPayloadSizes))]
+					ppayload := make([]byte, psize)
+					ppayload[0] = byte(j)
+					roots[j] = &fragNode{payload: ppayload}
+					operations.Add(1)
+				}
+			}
 		}
 	}
 }

@@ -87,6 +87,25 @@ var g1RefreshLiveObjects [g1RegionCount]uint64
 // g1ScanTag is the current generation of scanTag marks on regions.
 var g1ScanTag uint32
 
+// g1StickyRegions gates which target regions the marker indexes inbound
+// edges for. It holds the union of the previous window's selected regions,
+// so per-pointer recording costs track the candidate set rather than the
+// whole heap; regions outside it become candidates only after a window
+// without recording converges. Seeded to all-ones so the very first window
+// observes everything.
+var g1StickyRegions [g1RegionCount / 64]uint64
+
+func init() {
+	for i := range g1StickyRegions {
+		g1StickyRegions[i] = ^uint64(0)
+	}
+}
+
+//go:nosplit
+func g1RegionSticky(index uintptr) bool {
+	return g1StickyRegions[index/64]>>(index%64)&1 != 0
+}
+
 // g1LowLiveRegions lists the used regions whose live bytes are below half of
 // their used bytes. Evacuation can only select spans from these regions, so
 // the list lets selection walk region span lists instead of all of allspans.
@@ -239,13 +258,16 @@ func g1gcStartCycle() {
 	g1gcSetEvacIndexActive(0)
 	if debug.g1evac != 0 {
 		allocNow := gcController.totalAlloc.Load()
-		if allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1gcEvacThreshold() {
+		// High-allocation-rate heaps cross any byte threshold constantly;
+		// require quiet time in cycles too so window costs stay amortized.
+		if allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1gcEvacThreshold() && epoch-g1EvacLastWindowEpoch >= g1EvacMinCycleGap {
 			g1gcResetInbound()
 			g1gcResetWBSlots()
 			clear(g1RootRegions[:])
 			// Re-base the incremental live totals for this window's marking
 			// cycle so its mark termination can skip the mark-bit census.
 			g1gcResetLiveCounts()
+			g1EvacLastWindowEpoch = epoch
 			evacActive = true
 			g1gcSetEvacIndexActive(1)
 		}
@@ -677,6 +699,16 @@ func g1gcInitializeUsed() {
 			count++
 		}
 		g1LowLiveCount = count
+		// Publish the candidate observation for the next window: its marker
+		// will index inbound edges only for these regions.
+		clear(g1StickyRegions[:])
+		for i := uint64(0); i < count; i++ {
+			index := g1LowLiveRegions[i]
+			if g1RootRegions[index/8]>>(index&7)&1 != 0 {
+				continue
+			}
+			g1StickyRegions[index/64] |= 1 << (index % 64)
+		}
 	}
 }
 

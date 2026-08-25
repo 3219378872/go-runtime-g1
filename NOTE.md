@@ -7,6 +7,46 @@ entry point for format checks, runtime/SSA gates, project tests, race tests,
 and matched official-versus-candidate benchmarks. The benchmark comparator
 is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
 
+## Iteration 2026-08-25c: overhead attribution — steady-state tax is noise
+
+Session goal was chasing the gc_cpu overhead flagged by p1b (1.03-1.09x).
+Three-config attribution on pointer64 (default / `g1gc=1` / `+g1evac=1`,
+n=5 alternating vs official go1.27.0) measured **no separable bookkeeping
+tax**: default tp 0.988 / gc_cpu 1.041, g1gc-only 0.992 / 1.007, evac
+1.032 / 0.991 — the evac row beat default inside one session, confirming
+that idle-window suspension drives evacuation's steady-state cost below
+the noise floor. The considered optimization (gating the allocation/sweep
+hooks on `g1gcUsedStatsActive`) was therefore REJECTED: it would add a
+gate to hot paths for an unmeasurable win.
+
+Full eight-row matrix (labels p2-*, n=7 @5s) came out host-noise-dominated:
+alloc-default posted stw_max 1.85 and pointer256 rows split 1.035/0.924,
+so five key rows were re-run at DURATION=15s (p2s-*):
+
+| row | tp | stw_max | stw_p99 | gc_cpu |
+|---|---|---|---|---|
+| pointer64 evac | 0.958 | 0.913 | 1.103 | 1.030 |
+| alloc evac | **1.007** | 0.929 | 0.844 | 1.039 |
+| frag evac | 0.983 | 0.997 | 1.023 | 1.063 |
+| frag default | 0.985 | 0.895 | 0.953 | 1.029 |
+
+Reading: alloc-evac is stable at parity-or-better across three independent
+measurement sessions (0.988 / 1.007 / 1.007). Everything else swings
+0.96-1.04 between sessions on this shared WSL host — machine variance now
+exceeds the remaining deltas, so single-session medians can no longer
+adjudicate sub-3% effects. Correctness stress and gates stayed green
+throughout; nothing in the runtime changed this session.
+
+### Next session
+
+- Structural work only: region-aware allocation in the fork's default path
+  is the remaining lever for pointer-class throughput parity; tuning
+  evacuation further cannot show through the noise.
+- Any future benchmark claims on sub-3% effects need DURATION>=15s, n>=7,
+  interleaved same-hour comparisons, or a quieter host.
+- Optional hygiene: consider pinning repeat.sh to report per-run spread so
+  session-to-session drift is visible in summaries.
+
 ## Iteration 2026-08-25b: engagement rework — Phase 1 redirected by attribution
 
 Session goal was Phase 1 (window pause floor). Phase attribution on the

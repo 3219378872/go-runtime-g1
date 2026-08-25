@@ -238,6 +238,13 @@ func (c *mcache) refill(spc spanClass) {
 	gcController.update(int64(s.npages*pageSize)-int64(usedBytes), int64(c.scanAlloc))
 	c.scanAlloc = 0
 
+	// Dirty the new span's region immediately: free slots preloaded into
+	// allocCache are consumed through the fast path, so the first slow-path
+	// batch hook can lag the actual allocations by up to a full cache word.
+	if debug.g1gc != 0 {
+		g1gcRecordAllocBatch(s, uint64(s.allocCount))
+	}
+
 	c.alloc[spc] = s
 }
 

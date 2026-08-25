@@ -1418,6 +1418,7 @@ func gcMarkTermination(stw worldStop) {
 		}
 		if debug.g1gc != 0 && debug.g1evac != 0 && g1gcCycleStarted != 0 {
 			g1gcEvacuate()
+			g1gcPublishStickyRegions()
 		}
 		stwSwept = gcSweep(work.mode)
 		if debug.g1gc != 0 && debug.g1evac != 0 && g1gcCycleStarted != 0 {
@@ -1810,7 +1811,12 @@ func gcBgMarkWorker(ready chan struct{}) {
 	// below. gcBgMarkWorkerPool keeps pointers to nodes that are not
 	// GC-visible, so this must be kept alive indefinitely (even if
 	// GOMAXPROCS decreases).
-	node := &new(gcBgMarkWorkerNodePadded).gcBgMarkWorkerNode
+	//
+	// The G1 evacuation path can relocate ordinary heap objects, and these
+	// nodes are referenced only from the lock-free worker pool and P fields
+	// the marker never scans. Allocate them from non-heap memory so they
+	// can never move.
+	node := (*gcBgMarkWorkerNode)(persistentalloc(unsafe.Sizeof(gcBgMarkWorkerNodePadded{}), tagAlign, &memstats.gcMiscSys))
 	gp.m.preemptoff = ""
 
 	node.gp.set(gp)

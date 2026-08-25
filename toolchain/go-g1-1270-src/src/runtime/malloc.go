@@ -1020,6 +1020,13 @@ func (c *mcache) nextFree(spc spanClass) (v gclinkptr, s *mspan, checkGCTrigger 
 		println("s.allocCount=", s.allocCount, "s.nelems=", s.nelems)
 		throw("s.allocCount > s.nelems")
 	}
+	// A cached span absorbs allocations across GC cycles without ever
+	// passing refill or releaseAll, so its region would otherwise stay
+	// clean while usedBytes grows. This slow path fires once per allocCache
+	// batch (~64 allocations), which bounds the hook cost.
+	if debug.g1gc != 0 {
+		g1gcRecordAllocBatch(s, uint64(s.allocCount))
+	}
 	return
 }
 

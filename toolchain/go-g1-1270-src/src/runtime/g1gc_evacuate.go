@@ -843,8 +843,17 @@ func g1gcVerifyFullRewrite() {
 							if b2 == 0 || sp2 == nil || sp2.g1evacDest == nil {
 								continue
 							}
+							objIdx2 := (p - b2) / sp2.elemsize
+							dbit := sp2.g1evacDest.allocBitsForIndex(objIdx2).isMarked()
 							print("  miss owner=", hex(s.base()), " es=", s.elemsize, " objidx=", j,
-								" winreg=", window, " tgt=", hex(p), "\n")
+								" winreg=", window,
+								" listed=", s.g1rewriteEpoch == g1EvacEpoch,
+								" fi=", s.freeindex, " ac=", s.allocCount, " ne=", s.nelems,
+								" abit=", j < uintptr(s.freeindex) || abits.isMarked(),
+								" mbit=", mbits.isMarked(),
+								" imc=", gcUsesSpanInlineMarkBits(s.elemsize),
+								" tbase=", hex(b2), " tes=", sp2.elemsize, " tac=", sp2.allocCount,
+								" tdbit=", dbit, "\n")
 						}
 					}
 					mbits.advance()

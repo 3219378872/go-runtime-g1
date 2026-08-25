@@ -753,16 +753,25 @@ func g1gcInitializeUsed() {
 			count++
 		}
 		g1LowLiveCount = count
-		// Publish the candidate observation for the next window: its marker
-		// will index inbound edges only for these regions.
-		clear(g1StickyRegions[:])
-		for i := uint64(0); i < count; i++ {
-			index := g1LowLiveRegions[i]
-			if g1GlobalRootRegions[index/8]>>(index&7)&1 != 0 {
-				continue
-			}
-			g1StickyRegions[index/64] |= 1 << (index % 64)
+	}
+}
+
+// g1gcPublishStickyRegions republishes the candidate snapshot for the next
+// evacuation window. It must run AFTER g1gcEvacuate consumed the previous
+// snapshot: selection inside a window may only pick regions whose inbound
+// edges this window's marker actually recorded, so the recorder and the
+// selector have to observe the same bitmap for the whole window. Republishing
+// before selection (as initializeUsed once did) let freshly low-live regions
+// slip into the collection set with no indexed edges, which surfaced as
+// bounded rewrite misses on workloads whose live set shifts between windows.
+func g1gcPublishStickyRegions() {
+	clear(g1StickyRegions[:])
+	for i := uint64(0); i < g1LowLiveCount; i++ {
+		index := g1LowLiveRegions[i]
+		if g1GlobalRootRegions[index/8]>>(index&7)&1 != 0 {
+			continue
 		}
+		g1StickyRegions[index/64] |= 1 << (index % 64)
 	}
 }
 

@@ -2,7 +2,11 @@
 set -euo pipefail
 
 repo_dir=$(cd "$(dirname "$0")/.." && pwd)
-official_go=${OFFICIAL_GO:-/usr/local/go/bin/go}
+# Prefer the tracked-in-place official toolchain over whatever /usr/local/go
+# happens to be: that install can be a fork build, which silently turns every
+# "official-versus-candidate" comparison into fork-versus-fork.
+official_go=${OFFICIAL_GO:-"$repo_dir/toolchain/official-go-1270/go/bin/go"}
+[[ -x "$official_go" ]] || official_go=/usr/local/go/bin/go
 # Keep the default in sync with CANDIDATE_ROOT in the justfile; CANDIDATE_GO
 # still wins when a caller needs a specific binary.
 candidate_root=${CANDIDATE_ROOT:-"$repo_dir/toolchain/go-g1-1270-src"}

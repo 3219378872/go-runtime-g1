@@ -305,10 +305,21 @@ func g1gcStartCycle() {
 	evacActive := false
 	g1gcSetEvacIndexActive(0)
 	if debug.g1evac != 0 {
+		// A suspended collector stays off until the retained heap grows by
+		// the re-arm fraction: growth is the cheap proxy for new
+		// fragmentation worth rescanning for.
+		armed := !g1EvacSuspended
+		if g1EvacSuspended {
+			live := gcController.heapLive.Load()
+			armed = live*g1EvacuationRearmDen >= g1EvacSuspendHeapLive*g1EvacuationRearmNum
+			if armed {
+				g1EvacSuspended = false
+			}
+		}
 		allocNow := gcController.totalAlloc.Load()
 		// High-allocation-rate heaps cross any byte threshold constantly;
 		// require quiet time in cycles too so window costs stay amortized.
-		if allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1gcEvacThreshold() && epoch-g1EvacLastWindowEpoch >= g1EvacMinCycleGap {
+		if armed && allocNow >= g1EvacLastAlloc && allocNow-g1EvacLastAlloc >= g1gcEvacThreshold() && epoch-g1EvacLastWindowEpoch >= g1EvacMinCycleGap {
 			g1gcResetInbound()
 			g1gcResetWBSlots()
 			clear(g1GlobalRootRegions[:])
@@ -1158,5 +1169,6 @@ func g1gcTrace() {
 		" dbg-cands ", g1DbgCands.Load(), " dbg-nilcens ", g1DbgNilCens.Load(),
 		" dbg-dstnil ", g1DbgDstNil.Load(), " dbg-sellive ", g1DbgSelLive.Load(),
 		" dbg-minlive ", g1DbgMinLive.Load(), " dbg-lowlive ", g1DbgLowLive.Load(),
-		" dbg-tagged ", g1DbgTagged.Load())
+		" dbg-tagged ", g1DbgTagged.Load(),
+		" evac-idle ", uint64(g1EvacIdleWindows), " evac-suspended ", bool2int(g1EvacSuspended))
 }

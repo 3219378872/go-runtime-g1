@@ -37,6 +37,28 @@ const (
 // near ordinary mark termination.
 const g1EvacuationCopyBudget = 256 << 10
 
+// A window must project at least this many dead bytes behind its live ones to
+// justify engaging at all: moving a few kilobytes of survivors to free their
+// sparse spans only pays when the reclaimed space covers a meaningful slice of
+// the copy budget. Live bytes additionally face the absolute floor below so a
+// window never moves a handful of tiny objects.
+const (
+	g1EvacuationMinReclaimBytes = g1EvacuationCopyBudget / 8
+	g1EvacuationMinLiveFloor    = 1 << 10
+)
+
+// Windows whose selection finds nothing viable end without consuming their
+// allocation credit, so an accumulation of reclaimable garbage retries soon.
+// Heaps where selection keeps coming up empty (uniformly dense live data)
+// would pay the marking-time recording tax forever, so after this many
+// consecutive idle windows evacuation suspends entirely until the heap grows
+// by the re-arm fraction, which is the signal that fragmentation returned.
+const (
+	g1EvacuationIdleSuspendAfter = 3
+	g1EvacuationRearmNum         = 5
+	g1EvacuationRearmDen         = 4
+)
+
 // Full-heap rewriting is deliberately throttled. A cycle still computes the
 // live-region policy every time, but moving objects only when enough elapsed
 // allocation has accumulated keeps the experimental stop-the-world path from
@@ -61,6 +83,34 @@ var g1EvacRegionEpoch [g1RegionCount]uint64
 var g1EvacEpoch uint64
 
 var g1EvacLastAlloc uint64
+
+// Idle-window accounting for adaptive arming. All three are written only
+// while the world is stopped (mark termination and cycle start) and read in
+// the same contexts.
+var (
+	g1EvacIdleWindows     int
+	g1EvacSuspended       bool
+	g1EvacSuspendHeapLive uint64
+)
+
+// g1gcNoteIdleWindow records an activation whose selection produced no
+// copies, suspending evacuation after repeated idle windows so dense heaps
+// stop paying the recording tax.
+func g1gcNoteIdleWindow() {
+	g1EvacIdleWindows++
+	if g1EvacIdleWindows >= g1EvacuationIdleSuspendAfter && !g1EvacSuspended {
+		g1EvacSuspended = true
+		g1EvacSuspendHeapLive = gcController.heapLive.Load()
+	}
+}
+
+// g1gcCommitProductiveWindow consumes the window's allocation credit only
+// when objects actually moved, and re-arms a suspended collector outright.
+func g1gcCommitProductiveWindow(allocNow uint64) {
+	g1EvacLastAlloc = allocNow
+	g1EvacIdleWindows = 0
+	g1EvacSuspended = false
+}
 
 // Last-window selection diagnostics for g1trace.
 var (
@@ -498,7 +548,10 @@ func g1gcEvacuate() {
 	if allocNow < g1EvacLastAlloc || allocNow-g1EvacLastAlloc < g1gcEvacThreshold() {
 		return
 	}
-	g1EvacLastAlloc = allocNow
+	// The credit is consumed only when a window actually moves objects (see
+	// g1gcCommitProductiveWindow); unproductive attempts leave it intact so
+	// accumulating garbage retries on the next cycle instead of waiting for
+	// another full threshold of allocation.
 	// Edges written after the last mutator-time flush sit in the per-P
 	// write-barrier buffers. Record them before any overflow check so the
 	// inbound index covers every store of this marking window.
@@ -545,6 +598,7 @@ func g1gcEvacuate() {
 		return
 	}
 	var selectedLiveBytes uint64
+	var selectedReclaimBytes uint64
 	var projectedObjects uint64
 	budgetRemaining := uint64(g1EvacuationCopyBudget)
 	candidateSpans := 0
@@ -576,17 +630,23 @@ func g1gcEvacuate() {
 			continue
 		}
 		selectedLiveBytes += liveBytes
+		selectedReclaimBytes += uint64(g1EvacCandidates[c].npages)*uint64(pageSize) - liveBytes
 		projectedObjects += liveObjects
 		g1EvacCandidateLive[c] = liveObjects
 	}
 	g1DbgCands.Store(int64(candidateSpans))
 	g1DbgSelLive.Store(int64(selectedLiveBytes))
 	g1DbgMinLive.Store(int64(minLiveBytes))
-	if selectedLiveBytes < minLiveBytes {
+	if selectedReclaimBytes < g1EvacuationMinReclaimBytes || selectedLiveBytes < g1EvacuationMinLiveFloor {
+		// The viable set cannot justify a window. End it without consuming
+		// the allocation credit; the discarded edge state is rebuilt by the
+		// next activation.
 		g1gcDiscardProjectedSet()
 		for c := 0; c < candidateSpans; c++ {
 			g1EvacCandidates[c] = nil
 		}
+		g1gcNoteIdleWindow()
+		g1gcResetInbound()
 		g1LastEvacSelectNs = nanotime() - selectStart
 		g1LastEvacNanos = nanotime() - evacStart
 		g1gcSetEvacIndexActive(0)
@@ -600,6 +660,8 @@ func g1gcEvacuate() {
 		for c := 0; c < candidateSpans; c++ {
 			g1EvacCandidates[c] = nil
 		}
+		g1gcNoteIdleWindow()
+		g1gcResetInbound()
 		g1LastEvacSelectNs = nanotime() - selectStart
 		g1LastEvacNanos = nanotime() - evacStart
 		g1gcSetEvacIndexActive(0)
@@ -646,7 +708,8 @@ func g1gcEvacuate() {
 	}
 	g1LastEvacSelectNs = nanotime() - selectStart
 	if g1EvacDestHead == nil {
-		// Nothing was copied, so discard the projected rewrite set.
+		// Nothing was copied even though selection passed, so discard the
+		// projected rewrite set and treat the window as idle.
 		for s := g1RewriteSpanHead; s != nil; {
 			next := s.g1rewriteNext
 			s.g1rewriteNext = nil
@@ -654,6 +717,8 @@ func g1gcEvacuate() {
 		}
 		g1RewriteSpanHead = nil
 		g1LastRewriteSpans = 0
+		g1gcNoteIdleWindow()
+		g1gcResetInbound()
 		g1LastEvacNanos = nanotime() - evacStart
 		g1gcSetEvacIndexActive(0)
 		return
@@ -744,6 +809,7 @@ func g1gcEvacuate() {
 		g1gcClearSourceBits(s)
 		s.g1evacDest = nil
 	}
+	g1gcCommitProductiveWindow(allocNow)
 	g1LastEvacNanos = nanotime() - evacStart
 	g1gcSetEvacIndexActive(0)
 }

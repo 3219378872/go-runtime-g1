@@ -7,6 +7,74 @@ entry point for format checks, runtime/SSA gates, project tests, race tests,
 and matched official-versus-candidate benchmarks. The benchmark comparator
 is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
 
+## Iteration 2026-08-25b: engagement rework — Phase 1 redirected by attribution
+
+Session goal was Phase 1 (window pause floor). Phase attribution on the
+post-fix tree killed the premise: windows now cost **47us on frag and 12us
+on pointer64** (select 80%/57%, everything else ~0) — the historical
+~1ms fixed cost is gone, so prewarmed destinations, the chunk-presence
+bitmap, quickselect, and gated generation stores all attribute to noise at
+current scales and stay deferred. The real bottleneck moved to
+**engagement**: most frag attempts selected nothing (`sellive < minlive`,
+burning their allocation credit), and pointer64/alloc found zero candidates
+at all — evacuation was paying marking-time recording tax for windows that
+never copied anything.
+
+### Changes (all in g1gc.go / g1gc_evacuate.go)
+
+- **Credit only on productivity**: `g1EvacLastAlloc` is committed via
+  `g1gcCommitProductiveWindow` only when objects actually moved. Unproductive
+  attempts end the window (deactivate + reset inbound, matching the other
+  early-return paths) and retry after the next cycle instead of after another
+  full allocation threshold.
+- **Reclaim-based selection gate**: a window proceeds when projected reclaim
+  (`spanBytes - liveBytes` over accepted candidates) reaches
+  `g1EvacuationMinReclaimBytes` (copy budget / 8 = 32 KiB) with an absolute
+  live floor of 1 KiB — moving 8 KiB of survivors to free 56 KiB of sparse
+  spans is a clear win that the old live-bytes gate (`minLiveBytes`, used /
+  4096) rejected outright on frag.
+- **Adaptive arming**: three consecutive idle windows suspend evacuation;
+  a suspended collector skips activation entirely (no recording tax) until
+  `heapLive` grows 25% past the suspension point. Dense uniform heaps
+  (pointer64, alloc) go inert within a few windows; fragmentation returning
+  re-arms automatically. Trace lines gained `evac-idle` / `evac-suspended`.
+- **Comparator fix** (bench/run.sh): default OFFICIAL_GO now prefers
+  `toolchain/official-go-1270/go/bin/go`; `/usr/local/go` on this host is a
+  fork-built go1.26.6, which silently turned comparisons into
+  fork-vs-fork. The p0-fix-frag numbers from the previous session were
+  actually against go1.26.6-fork; direction unchanged, magnitude unverified.
+
+### Baseline matrix (n=7 alternating medians vs official go1.27.0,
+GOMAXPROCS=2, CPU_LIST=0,2, DURATION=5s, LIVE_ROOTS=1024, labels p1b-*):
+
+| scenario | config | tp | stw_max | stw_p99 | gc_cpu |
+|---|---|---|---|---|---|
+| pointer64 | evac | 0.957 | 1.046 | 1.100 | 1.080 |
+| frag | evac | **1.041** | **0.568** | 1.027 | 1.032 |
+| alloc | evac | **1.007** | 0.940 | 1.028 | 1.089 |
+
+Reading: frag+evac is fully healthy for the first time — it engages,
+compacts, beats upstream throughput, and cuts worst-case pauses to 0.57x.
+alloc crossed throughput parity. pointer64 improved (0.946 -> 0.957) but its
+stw_max slipped versus the exceptional b1270 sample (0.885); its gap to tp
+parity is now mostly early-window taxes plus g1gc bookkeeping, since
+suspension zeroes the steady-state cost.
+
+Correctness held throughout: frag/pointer64 x g1evac=4,g1trace=1 stress
+10/10 clean; just verify green; production-flag smokes clean.
+
+### Next session
+
+- Chase the remaining gc_cpu overhead (~3-9%): profile whether it is
+  mark-time inbound recording during armed windows or the always-on g1gc=1
+  bookkeeping (my nextFree/refill hooks are candidates), then either bound
+  recording tighter or cheapen the hooks.
+- pointer64 tp parity: the workload's half-live heap offers no low-live
+  regions, so the endgame there may be making the default path itself faster
+  (region-aware allocation) rather than tuning evacuation further.
+- Re-run the full eight-row matrix including default rows as the standing
+  reference before any new performance work.
+
 ## Iteration 2026-08-25: frag correctness chain closed
 
 Session goal was the P0 pair from 2026-08-24e: root-cause the residual

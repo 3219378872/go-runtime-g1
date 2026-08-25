@@ -17,6 +17,9 @@ type result struct {
 	PauseP99Ns          int64   `json:"pause_p99_ns"`
 	GCCPUFraction       float64 `json:"gc_cpu_fraction"`
 	HeapSysBytes        uint64  `json:"heap_sys_bytes"`
+	RSSMaxMB            float64 `json:"rss_max_mb"`
+	RSSAvgMB            float64 `json:"rss_avg_mb"`
+	RSSFinalMB          float64 `json:"rss_final_mb"`
 }
 
 func main() {
@@ -40,6 +43,9 @@ func main() {
 	row("STW p99 ns", float64(official.PauseP99Ns), float64(candidate.PauseP99Ns), true)
 	row("GC CPU fraction", official.GCCPUFraction, candidate.GCCPUFraction, true)
 	row("heap sys bytes", float64(official.HeapSysBytes), float64(candidate.HeapSysBytes), true)
+	row("rss max MB", official.RSSMaxMB, candidate.RSSMaxMB, true)
+	row("rss avg MB", official.RSSAvgMB, candidate.RSSAvgMB, true)
+	row("rss final MB", official.RSSFinalMB, candidate.RSSFinalMB, true)
 }
 
 func load(path string) result {

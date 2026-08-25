@@ -9,6 +9,8 @@ import (
 	"runtime/debug"
 	"runtime/metrics"
 	"runtime/pprof"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,28 +35,32 @@ type fragNode struct {
 }
 
 type result struct {
-	Runtime             string  `json:"runtime"`
-	Scenario            string  `json:"scenario"`
-	DurationSeconds     float64 `json:"duration_seconds"`
-	Workers             int     `json:"workers"`
-	GOMAXPROCS          int     `json:"gomaxprocs"`
-	GOGC                int     `json:"gogc"`
-	Operations          uint64  `json:"operations"`
-	OperationsPerSecond float64 `json:"operations_per_second"`
-	TotalAllocBytes     uint64  `json:"total_alloc_bytes"`
-	HeapAllocBytes      uint64  `json:"heap_alloc_bytes"`
-	HeapInuseBytes      uint64  `json:"heap_inuse_bytes"`
-	HeapSysBytes        uint64  `json:"heap_sys_bytes"`
-	HeapObjects         uint64  `json:"heap_objects"`
-	NumGC               uint32  `json:"num_gc"`
-	GCCPUFraction       float64 `json:"gc_cpu_fraction"`
-	PauseTotalNs        uint64  `json:"pause_total_ns"`
-	PauseCount          int     `json:"pause_count"`
-	MaxPauseNs          int64   `json:"max_pause_ns"`
-	PauseP99Ns          int64   `json:"pause_p99_ns"`
-	CyclesTotal         uint64  `json:"cycles_total"`
-	HeapObjectsMetric   uint64  `json:"heap_objects_metric"`
-	GCTrace             string  `json:"gc_trace_file,omitempty"`
+	Runtime             string    `json:"runtime"`
+	Scenario            string    `json:"scenario"`
+	DurationSeconds     float64   `json:"duration_seconds"`
+	Workers             int       `json:"workers"`
+	GOMAXPROCS          int       `json:"gomaxprocs"`
+	GOGC                int       `json:"gogc"`
+	Operations          uint64    `json:"operations"`
+	OperationsPerSecond float64   `json:"operations_per_second"`
+	TotalAllocBytes     uint64    `json:"total_alloc_bytes"`
+	HeapAllocBytes      uint64    `json:"heap_alloc_bytes"`
+	HeapInuseBytes      uint64    `json:"heap_inuse_bytes"`
+	HeapSysBytes        uint64    `json:"heap_sys_bytes"`
+	HeapObjects         uint64    `json:"heap_objects"`
+	NumGC               uint32    `json:"num_gc"`
+	GCCPUFraction       float64   `json:"gc_cpu_fraction"`
+	PauseTotalNs        uint64    `json:"pause_total_ns"`
+	PauseCount          int       `json:"pause_count"`
+	MaxPauseNs          int64     `json:"max_pause_ns"`
+	PauseP99Ns          int64     `json:"pause_p99_ns"`
+	CyclesTotal         uint64    `json:"cycles_total"`
+	HeapObjectsMetric   uint64    `json:"heap_objects_metric"`
+	RSSMaxMB            float64   `json:"rss_max_mb"`
+	RSSAvgMB            float64   `json:"rss_avg_mb"`
+	RSSFinalMB          float64   `json:"rss_final_mb"`
+	RssSamplesMB        []float64 `json:"rss_samples_mb,omitempty"`
+	GCTrace             string    `json:"gc_trace_file,omitempty"`
 }
 
 type config struct {
@@ -127,6 +133,17 @@ func main() {
 	var beforeCycles uint64
 	beforeCycles, _ = readMetrics()
 	started := time.Now()
+	// Track the resident set over the measured window: Go-level heap
+	// counters do not see whether the scavenger actually returned memory,
+	// which is the observable payoff of compaction on fragmented heaps.
+	rssStop := make(chan struct{})
+	var rssWG sync.WaitGroup
+	var rssSamples []float64
+	rssWG.Add(1)
+	go func() {
+		defer rssWG.Done()
+		rssSamples = sampleRSS(rssStop, 50*time.Millisecond)
+	}()
 	var profileFile *os.File
 	if profilePath := os.Getenv("CPU_PROFILE"); profilePath != "" {
 		var err error
@@ -144,6 +161,8 @@ func main() {
 	<-timer.C
 	close(stop)
 	wg.Wait()
+	close(rssStop)
+	rssWG.Wait()
 	if profileFile != nil {
 		pprof.StopCPUProfile()
 		if err := profileFile.Close(); err != nil {
@@ -162,6 +181,7 @@ func main() {
 		pauses = []time.Duration{time.Duration(after.PauseTotalNs - before.PauseTotalNs)}
 	}
 	maxPause, p99 := pauseQuantiles(pauses)
+	rssMax, rssAvg, rssFinal := rssSummary(rssSamples)
 	output := result{
 		Runtime:             runtime.Version(),
 		Scenario:            cfg.scenario,
@@ -184,6 +204,10 @@ func main() {
 		PauseP99Ns:          p99,
 		CyclesTotal:         afterCycles - beforeCycles,
 		HeapObjectsMetric:   afterObjects,
+		RSSMaxMB:            rssMax,
+		RSSAvgMB:            rssAvg,
+		RSSFinalMB:          rssFinal,
+		RssSamplesMB:        rssSamples,
 	}
 	// Restore the process setting before any deferred runtime work can observe
 	// the temporary read mode used above.
@@ -191,6 +215,56 @@ func main() {
 	if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {
 		fatal(err.Error())
 	}
+}
+
+// sampleRSS polls the process resident set until stop is closed. It reads
+// /proc/self/statm directly so the series reflects what the kernel actually
+// holds, including pages the scavenger has or has not returned.
+func sampleRSS(stop <-chan struct{}, interval time.Duration) []float64 {
+	var samples []float64
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return samples
+		case <-ticker.C:
+			if mb := currentRSSMB(); mb > 0 {
+				samples = append(samples, mb)
+			}
+		}
+	}
+}
+
+func currentRSSMB() float64 {
+	data, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return 0
+	}
+	pages, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return float64(pages*uint64(os.Getpagesize())) / 1e6
+}
+
+func rssSummary(samples []float64) (maxMB, avgMB, finalMB float64) {
+	if len(samples) == 0 {
+		return 0, 0, 0
+	}
+	sum := 0.0
+	maxMB = samples[0]
+	for _, v := range samples {
+		sum += v
+		if v > maxMB {
+			maxMB = v
+		}
+	}
+	return maxMB, sum / float64(len(samples)), samples[len(samples)-1]
 }
 
 func makeRoots64(n int) []*node64 {

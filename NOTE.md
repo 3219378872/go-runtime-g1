@@ -7,6 +7,63 @@ entry point for format checks, runtime/SSA gates, project tests, race tests,
 and matched official-versus-candidate benchmarks. The benchmark comparator
 is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
 
+## Iteration 2026-08-25d: RSS instrumentation — memory story corrected
+
+Session goal was region-aware allocation; before designing it, the
+memory-behavior claim needed rigor, because the long-standing "heap_sys
+0.28x on frag" number came from the era when the comparator silently was
+the go1.26.6 fork (see 2026-08-25b). New instrumentation:
+
+- bench/workload samples the process resident set every 50ms from
+  /proc/self/statm over the measured window (`rss_max/avg/final_mb` plus
+  the full series in the JSON); bench/compare prints RSS ratio rows and
+  repeat.sh aggregates them into paired summaries.
+- The sampler is noise-immune for effects of its own magnitude: paired
+  throughput with sampling enabled stays inside the established band.
+
+### Findings (frag, 15s, n=5 paired vs official go1.27.0, label p3-frag-mem)
+
+| metric | official | candidate | ratio |
+|---|---|---|---|
+| rss max | 122 MB | 156 MB | 1.22x |
+| rss final | 75 MB | 63 MB | **0.84x** |
+
+Isolation runs attribute the pieces:
+
+- Candidate with `g1gc=1` only: rss_max 161 / final 82 MB.
+- Candidate with zero GODEBUG: rss_max 158 / final 75 MB.
+- Official-toolchain-built workload binary: rss_max ~122-145 across
+  sessions (host drift visible here too).
+
+Conclusions:
+
+1. **The old 0.28x heap_sys story was a fork-vs-fork artifact and is
+   retracted.** Against real upstream the candidate reserves MORE virtual
+   heap (381 vs 276 MB) while ending LOWER in kernel-resident pages.
+2. **Evacuation's peak-memory cost is ~zero**: evac-on peaks at or below
+   evac-off (156 vs 158-161 MB) because windows copy at most the bounded
+   budget before sources retire.
+3. **Evacuation delivers real memory return**: final RSS -16% vs upstream
+   and -23% vs the same fork without evacuation — compaction + scavenge
+   actually hand pages back on fragmented heaps.
+4. **NEW open item — fork-base residency**: the fork toolchain's binaries
+   carry **29.6 MB of BSS versus 0.22 MB upstream** (size(1)), which
+   matches the g1 static tables (16 MB inbound-edge array, ~4 MB region
+   stats, ~6 MB of per-region index arrays). Paired runs show the base
+   elevation exists with every GODEBUG path inert, though the arrays are
+   only touched sparsely by design — so either something touches them
+   unintentionally, or the delta has a second source inside the fork's
+   codegen/runtime layout. This is now the top investigation target.
+
+### Next session
+
+- Root-cause the fork-base RSS elevation: page-level attribution via
+  /proc/self/smaps diffs between the two binaries, then shrink or lazily
+  back the oversized static tables (the 1M-entry inbound-edge array does
+  not need physical storage until an armed window actually records).
+- Re-measure tp/RSS after the tables shrink; revisit whether region-aware
+  allocation still matters once the baseline is clean.
+
 ## Iteration 2026-08-25c: overhead attribution — steady-state tax is noise
 
 Session goal was chasing the gc_cpu overhead flagged by p1b (1.03-1.09x).

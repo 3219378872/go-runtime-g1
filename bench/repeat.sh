@@ -63,6 +63,7 @@ aggregate() {
 			gc_cpu_fraction: summarize("gc_cpu_fraction"),
 			heap_sys_bytes: summarize("heap_sys_bytes"),
 			rss_max_mb: summarize("rss_max_mb"),
+			rss_avg_mb: summarize("rss_avg_mb"),
 			rss_final_mb: summarize("rss_final_mb")
 		}
 	' "$@"
@@ -96,6 +97,7 @@ paired_ratios=$(jq -s --argjson runs "$repeats" '
 			gc_cpu_fraction: ratio($candidate[$run]; $official[$run]; "gc_cpu_fraction"),
 			heap_sys_bytes: ratio($candidate[$run]; $official[$run]; "heap_sys_bytes"),
 			rss_max_mb: ratio($candidate[$run]; $official[$run]; "rss_max_mb"),
+			rss_avg_mb: ratio($candidate[$run]; $official[$run]; "rss_avg_mb"),
 			rss_final_mb: ratio($candidate[$run]; $official[$run]; "rss_final_mb")
 		}
 	] as $per_run |
@@ -111,6 +113,7 @@ paired_ratios=$(jq -s --argjson runs "$repeats" '
 			gc_cpu_fraction: ([$per_run[].gc_cpu_fraction] | summarize),
 			heap_sys_bytes: ([$per_run[].heap_sys_bytes] | summarize),
 			rss_max_mb: ([$per_run[].rss_max_mb] | summarize),
+			rss_avg_mb: ([$per_run[].rss_avg_mb] | summarize),
 			rss_final_mb: ([$per_run[].rss_final_mb] | summarize)
 		}
 	}

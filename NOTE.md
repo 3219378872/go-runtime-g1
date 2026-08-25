@@ -7,6 +7,37 @@ entry point for format checks, runtime/SSA gates, project tests, race tests,
 and matched official-versus-candidate benchmarks. The benchmark comparator
 is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
 
+## Iteration 2026-08-25e: base-RSS elevation retracted — metric discipline
+
+Follow-up on 2026-08-25d item 4 (fork binaries carry 29.6 MB BSS vs
+0.22 MB upstream; suspected residency bug). Properly paired zero-GODEBUG
+runs (alternating fork-binary vs official-binary, n=4, same session)
+show **no base elevation**: final RSS identical within noise on both
+sides (70/84/75/60 vs 71/84/70/81 MB), and both sides' max statistics
+spike to 168-222 MB under host interference. The BSS tables are virtual
+only — untouched while every GODEBUG path is inert, exactly as designed.
+No code change warranted.
+
+The p3 "rss_max 1.22x" headline from the previous session is likewise a
+statistic artifact: per-run paired data shows avg RSS at parity
+(66.4/69.0/67.2 vs 67.1/67.1/65.9) and final RSS improved in two of
+three runs (-24%, -16%, ~0). Max-of-samples amplifies transient host
+events and must not headline memory claims on this host.
+
+Standing rules going forward:
+
+- Memory comparisons report **avg and final** RSS from paired runs;
+  rss_max is diagnostic only. repeat.sh now aggregates rss_avg alongside
+  max/final so summaries carry the robust numbers by default.
+- Any single-metric claim that flips sign between same-day sessions is
+  noise, not signal, regardless of n.
+
+Corrected memory story for the evacuation work: average footprint at
+parity, end-of-run residency up to -24% when fragmentation accumulates,
+peak cost unbounded by design (copy budget) and unobservable above host
+noise. The region-aware-allocation question stays open strictly on
+throughput grounds; there is no memory regression to justify it.
+
 ## Iteration 2026-08-25d: RSS instrumentation — memory story corrected
 
 Session goal was region-aware allocation; before designing it, the

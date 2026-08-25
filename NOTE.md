@@ -7,6 +7,93 @@ entry point for format checks, runtime/SSA gates, project tests, race tests,
 and matched official-versus-candidate benchmarks. The benchmark comparator
 is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
 
+## Iteration 2026-08-25: frag correctness chain closed
+
+Session goal was the P0 pair from 2026-08-24e: root-cause the residual
+rewrite misses and the frag used-region accounting undercount, restoring
+`g1evac` safety on frag-class workloads. All three open defects are fixed;
+the "g1evac=1 UNSAFE on frag" caveat from 2026-08-24d is lifted.
+
+### Fix 1 — used-region undercount came from cached-span allocations
+
+Reproduced deterministically (frag + `g1evac=4,g1trace=1`, threw within
+~75 cycles): `region N used-bytes undercount auth=X got=X-6048`, where 6048
+is exactly one size-class-288 span's worth of objects (21×288). At `g1evac=5`
+the allspans/windowscan dumps agreed completely, so the recount enumeration
+was sound — the ledger was merely stale. Root cause: the accounting hooks
+fired at mcache `refill` (uncaching the OLD span), `releaseAll`, and
+`allocLarge`, but a span sitting cached in an mcache absorbs allocations via
+the fast path across many GC cycles with no hook at all — modern runtimes do
+not flush mcaches at GC boundaries. Any region whose only change was
+cached-span growth stayed clean until an unrelated event dirtied it.
+
+Fix (`malloc.go` `nextFree` slow path + `mcache.go` `refill`): dirty the
+span's region once per allocCache batch (~64 allocations, amortized cost)
+and when a fresh span enters the cache, so fast-path consumption of
+preloaded cache words is covered too. Hooks remain gated on `debug.g1gc`.
+
+### Fix 2 — rewrite misses came from sticky-snapshot timing
+
+Enhanced the `g1evac>=5` miss dump (owner `listed=` membership, predicate
+bits `abit/mbit/imc`, target `tbase/tac/tdbit`). Decisive facts from real
+misses: every missed slot had `tdbit=false` yet the copy log showed the
+target WAS copied — the owner span simply had `listed=false winreg=false`,
+i.e. no bounded pass ever visited it. A forced-recording experiment (bypass
+the sticky gate) drove misses to zero, convicting the gate itself:
+
+`g1gcInitializeUsed` republished `g1StickyRegions` from fresh stats BEFORE
+`g1gcEvacuate` selected candidates, but the window's marker had recorded
+edges against the PREVIOUS window's snapshot. Any region newly low-live
+since then (constant on frag, whose migrations shift live sets between
+windows) entered the collection set with zero indexed edges. pointer64's
+stable live sets made the two snapshots coincide, hiding the bug.
+
+Fix: selection may only pick regions the recorder actually tracked, so the
+publish moved out of `initializeUsed` into `g1gcPublishStickyRegions`
+(g1gc.go), called after `g1gcEvacuate` (mgc.go mark termination). Recorder
+and selector now observe the same bitmap for the whole window by
+construction; newly low-live regions join one window later, matching the
+original design intent.
+
+### Fix 3 — the downstream nil-gp SIGSEGV was its own bug
+
+With misses eliminated, `casgstatus(0x0)` in findRunnableGCWorker kept
+reproducing (~2/6 runs) — independent of rewrite correctness. Root cause:
+`gcBgMarkWorkerNode` was heap-allocated (`new(gcBgMarkWorkerNodePadded)`)
+but referenced ONLY from non-scanned runtime structures (the lfstack worker
+pool and `pp.nextGCMarkWorker`). The marker never sees those edges, so the
+nodes' regions look low-live and get evacuated; ClearSourceBits zeroes the
+old memory and `node.gp` reads 0. Fix (mgc.go): allocate the nodes from
+`persistentalloc` with `tagAlign` — the alignment matters because lfstack
+packing requires 512-byte-aligned nodes (first attempt with PtrSize
+alignment tripped `taggedPointerPack` inside make.bash itself).
+
+### Gates and results
+
+- Build note: clean make.bash builds require
+  `GOROOT_BOOTSTRAP=$PWD/toolchain/go-g1-1266-src`; the installed
+  /usr/local/go (a 1.26.6 fork build) trips a version-stamp mismatch on
+  full rebuilds that incremental builds masked.
+- `just verify` green end-to-end (runtime gates, SSA, project, race,
+  format) with that bootstrap.
+- frag + `g1evac=4,g1trace=1`: **10/10 clean** (previously 6/6 threw on
+  drift alone, plus bounded misses and the SIGSEGV); windows engage and
+  copy productively (~68-108 source spans per 10s run).
+- pointer64 / pointer256 / alloc + `g1evac=4,g1trace=1`: 3/3 each.
+- Production config `g1evac=1` on frag: 5/5 clean; g1gc-demo OK.
+- Labeled repeat `p0-fix-frag` (n=3 alternating, frag + `g1evac=1` vs
+  official go1.27.0): tp median **1.035x** (min 1.008), stw_total 0.977,
+  stw_p99 1.099, gc_cpu 1.007, heap_sys 0.28x — the first frag+evac runs
+  that engage and beat upstream on throughput. Small n; re-measure at n=7
+  in the next session's matrix.
+
+### Next session
+
+Resume Phase 1 (window pause floor: prewarmed destinations, copied-source
+list, chunk presence bitmap, quickselect, gated generation stores) on top of
+the restored correctness baseline, and re-run the full b1270-style matrix as
+the reference for that work. Success bar unchanged.
+
 ## Iteration 2026-08-24e: rebase to go1.27.0
 
 Session goal was "跟进 go runtime 1.27.0". The rebase landed first-try with
@@ -405,7 +492,7 @@ pointer64, LIVE_ROOTS=131072, GOMAXPROCS=2, CPU_LIST=0,2):
   evacuations with no bad-pointer faults.
 - Benchmark labels `iter-baseline-*`, `iter-e1-*`, `iter-e2-*`,
   `iter-live128k-pointer64`, `iter-fix-live128k-pointer64`,
-  `iter-fix2-live128k-pointer64`, `p0b-*`, and `b1270-*` under
+  `iter-fix2-live128k-pointer64`, `p0b-*`, `b1270-*`, and `p0-fix-*` under
   `bench/results/repeated/`.
 
 ## Known Limits

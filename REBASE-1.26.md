@@ -1,12 +1,10 @@
 # Rebase plan: G1 fork onto go1.26.1
 
 Status: SUPERSEDED (2026-08-24). The active fork is
-`toolchain/go-g1-1266-src` (go1.26.6); this document's port notes remain
-accurate for how the hooks map onto 1.26-era internals, and the same
-overlay+three-way-merge procedure was used for the 1.26.6 rebase (only
-mgcmark.go overlapped upstream). Next rebase target: go1.27.0 — re-diff
-upstream drift in the hooked files first, expect larger churn than the
-1.26.1->1.26.6 point release. See NOTE.md iteration 2026-08-24d.
+`toolchain/go-g1-1270-src` (go1.27.0); see REBASE-1.27.md. This document's
+port notes remain accurate for how the hooks map onto 1.26-era internals,
+and the same overlay+three-way-merge procedure carried the port through
+both the 1.26.6 and 1.27.0 rebases (zero conflicts in each).
 
 Original status: PORTED AND BUILDING (2026-08-13). The G1 hooks now also live in
 `toolchain/go-g1-1261-src` (based on go1.26.1 source; only its generated

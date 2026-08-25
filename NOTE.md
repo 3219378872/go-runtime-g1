@@ -1,10 +1,68 @@
 # Current State
 
 This checkout contains a real Go runtime fork under
-`toolchain/go-g1-1266-src` (go1.26.6-based; the older `go-g1-1261-src`
-tree is kept for reference). The root `justfile` is the supported entry
-point for format checks, runtime/SSA gates, project tests, race tests,
-and matched official-versus-candidate benchmarks.
+`toolchain/go-g1-1270-src` (go1.27.0-based; the older go1.26.6 and
+go1.26.1 trees are kept for reference). The root `justfile` is the supported
+entry point for format checks, runtime/SSA gates, project tests, race tests,
+and matched official-versus-candidate benchmarks. The benchmark comparator
+is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
+
+## Iteration 2026-08-24e: rebase to go1.27.0
+
+Session goal was "跟进 go runtime 1.27.0". The rebase landed first-try with
+zero merge conflicts and zero manual hook fixes — see REBASE-1.27.md for
+the drift table (17 fork-modified files; only ten drifted upstream, all
+three-way merged cleanly; the new xRegScan async-register scan arrives via
+new preempt_{,no}xreg.go files and routes through existing hooks).
+
+### Gates (all green)
+
+make.bash on the go1.26.6 bootstrap; TestUnsafePoint/TestGcSys; SSA tests;
+project tests; race tests; g1gc-demo; pointer64 `g1evac=1,g1trace=1` smoke
+(12 productive evacuation windows, no faults, no missed rewrites).
+
+### Baseline matrix vs official go1.27.0 (n=7 alternating medians,
+GOMAXPROCS=2, CPU_LIST=0,2, DURATION=5s, LIVE_ROOTS=1024, labels b1270-*):
+| scenario | config | tp | stw_max | stw_p99 | gc_cpu |
+|---|---|---|---|---|---|
+| pointer64 | default | 0.976 | 1.611 | 1.140 | 1.036 |
+| pointer64 | evac | 0.946 | **0.885** | 1.145 | 1.057 |
+| pointer256 | default | 0.968 | 0.697 | 1.129 | 1.013 |
+| pointer256 | evac | 0.898 | **0.351** | 1.043 | 1.029 |
+| alloc | default | 0.982 | 0.936 | 0.871 | 1.059 |
+| alloc | evac | 0.964 | 0.881 | 1.020 | 1.052 |
+| frag | default | 0.946 | 0.990 | 1.000 | 1.059 |
+| frag | evac | crashed — same pre-existing failure as 1.26.6 baseline | | | |
+
+Reading: against official go1.27.0 the evacuation path keeps its tail
+latency win (stw_max 0.35-0.89 across pointer/alloc scenarios) but
+throughput sits 0.90-0.98x — part of the gap is upstream 1.27 improving
+the default collector (register-state conservative scanning et al.), which
+the fork inherits but does not yet exploit in its G1 paths. This is the
+new reference baseline; success bar unchanged (tp>1.0 stable,
+stw_max<1.0, stw_p99<1.0, gc_cpu<=1.0 everywhere, frag no worse than
+default).
+
+### Pre-existing correctness items re-confirmed unchanged by the rebase
+
+A/B stress against the go1.26.6 fork with identical binaries/parameters:
+
+- frag + `g1evac>=4,g1trace=1` (per-cycle used-region validation): "G1
+  incremental used-region accounting drifted" throws 6/6 on BOTH forks.
+  The incremental ledger undercounts a frag region before any window
+  engages; per-cycle validation was not previously combined with frag.
+- frag + `g1evac=4` without trace: bounded rewrite misses (2-67 slots)
+  plus one downstream nil-gp SIGSEGV reproduce on both forks — the open
+  rewrite-miss issue from 2026-08-24d, not a port regression.
+- pointer64 + `g1evac=4,g1trace=1`: clean 3/3 on both forks.
+
+### Next session
+
+Root-cause the residual rewrite misses (greenteagc inline-mark handling in
+g1gcRewriteSpan remains prime suspect), then the newly documented frag
+used-region accounting undercount (reproducible deterministically with
+frag + g1trace validation on both forks), then resume Phase 1 (window
+pause floor).
 
 ## Iteration 2026-08-24d: rebase to go1.26.6 + frag evacuation correctness
 
@@ -347,7 +405,8 @@ pointer64, LIVE_ROOTS=131072, GOMAXPROCS=2, CPU_LIST=0,2):
   evacuations with no bad-pointer faults.
 - Benchmark labels `iter-baseline-*`, `iter-e1-*`, `iter-e2-*`,
   `iter-live128k-pointer64`, `iter-fix-live128k-pointer64`,
-  `iter-fix2-live128k-pointer64` under `bench/results/repeated/`.
+  `iter-fix2-live128k-pointer64`, `p0b-*`, and `b1270-*` under
+  `bench/results/repeated/`.
 
 ## Known Limits
 
@@ -359,8 +418,9 @@ pointer64, LIVE_ROOTS=131072, GOMAXPROCS=2, CPU_LIST=0,2):
   in place.
 - The simulated package remains O(heap) in several operations and is intended
   for testing, not scalability work.
-- Official/candidate comparisons pair go1.26.6 against a fork based on
-  go1.26.1; upstream deltas between those tags are not controlled for.
+- Official/candidate comparisons now pair go1.27.0 against the fork based
+  on go1.27.0 (same base tag; earlier sessions compared go1.26.6 against a
+  go1.26.1-based fork, an uncontrolled upstream delta).
 
 Generated toolchain output and benchmark history are intentionally excluded
 from Git. Recreate them with `just build-toolchain` and the benchmark recipes.

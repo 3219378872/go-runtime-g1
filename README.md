@@ -63,3 +63,34 @@ Run the small workload demo with:
 ```text
 go run ./cmd/g1gc-demo
 ```
+
+## Benchmark environment
+
+A matched comparison is only as trustworthy as the host it runs on. The
+workflow below encodes what the NOTE.md baselines assume.
+
+1. Gate the host before burning wall clock:
+
+```text
+just bench-preflight          # CPU_LIST=0,2 by default
+```
+
+Hard-fails on offline benchmark cores or hypervisor steal above budget
+(MAX_STEAL_PCT); warns about missing CPU isolation, non-performance
+governors, runqueue pressure, and virtualization.
+
+2. On bare metal, isolate the benchmark pair from scheduler noise: boot
+with `isolcpus=nohz_full=<cores> rcu_nocbs=<cores>`, set the cpufreq
+governor to `performance`, and keep IRQs (irqbalance) off those cores.
+On VMs/WSL none of this is available; expect ±3-5% session-to-session
+throughput drift and treat sub-3% effects as unmeasurable there.
+
+3. Produce the standing reference matrix under the measurement protocol
+(15s runs, n=7 alternating, in-tree official go1.27.0):
+
+```text
+LABEL_PREFIX=mylabel just bench-matrix
+```
+
+4. Interpret memory via `rss_avg_mb` / `rss_final_mb` from paired runs;
+`rss_max_mb` amplifies transient host events and is diagnostic only.

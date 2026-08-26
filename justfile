@@ -29,6 +29,36 @@ check-tools:
     command -v taskset >/dev/null
     test -x "{{bootstrap_root}}/bin/go"
 
+# Pre-flight gate for matched benchmarks: cores online, hypervisor steal
+# budget, runqueue pressure, isolation/governor advisories.
+bench-preflight:
+    CPU_LIST="{{env_var_or_default('CPU_LIST', '0,2')}}" ./bench/env-check.sh
+
+# Standing reference matrix under the measurement protocol: 15s runs, n=7
+# alternating, in-tree official toolchain. Expect +/-3-5% tp drift per session.
+bench-matrix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo=$(pwd)
+    official="$repo/toolchain/official-go-1270/go/bin/go"
+    [[ -x "$official" ]] || { echo "official toolchain missing: $official" >&2; exit 1; }
+    export OFFICIAL_GO="$official"
+    scenarios="${SCENARIOS:-pointer64 pointer256 alloc frag}"
+    duration="${DURATION_VALUE:-15s}"
+    repeats="${REPEATS:-7}"
+    prefix="${LABEL_PREFIX:-matrix-$(date +%m%d-%H%M)}"
+    for sc in $scenarios; do
+        GODEBUG_VALUE="gctrace=0" LABEL="$prefix-$sc-default" \
+            REPEATS="$repeats" SCENARIO="$sc" DURATION="$duration" \
+            GOMAXPROCS_VALUE=2 CPU_LIST="${CPU_LIST:-0,2}" ./bench/repeat.sh >/dev/null
+        GODEBUG_VALUE="gctrace=0,g1gc=1,g1evac=1" LABEL="$prefix-$sc-evac" \
+            REPEATS="$repeats" SCENARIO="$sc" DURATION="$duration" \
+            GOMAXPROCS_VALUE=2 CPU_LIST="${CPU_LIST:-0,2}" ./bench/repeat.sh >/dev/null
+    done
+    for f in "$repo"/bench/results/repeated/"$prefix"-*.summary.json; do
+        jq -r '"\(.label): tp \(.paired_ratios.summary.throughput_ops_s.median)  stw_max \(.paired_ratios.summary.stw_max_ns.median)  gc_cpu \(.paired_ratios.summary.gc_cpu_fraction.median)  rss_final \(.paired_ratios.summary.rss_final_mb.median)"' "$f"
+    done
+
 # Format the project and the runtime fork files touched by this work.
 fmt:
     gofmt -w {{project_go_files}} {{fork_go_files}}

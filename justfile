@@ -17,7 +17,7 @@ summary_label := env_var_or_default("LABEL", "collection-set")
 smoke_duration := env_var_or_default("SMOKE_DURATION", "1s")
 
 project_go_files := "collect.go g1gc_test.go heap.go mark.go policy.go region.go types.go validate.go cmd/g1gc-demo/main.go bench/compare/main.go bench/workload/main.go"
-fork_go_files := "toolchain/go-g1-1270-src/src/runtime/mheap.go toolchain/go-g1-1270-src/src/runtime/mgcmark.go toolchain/go-g1-1270-src/src/runtime/mgcmark_greenteagc.go toolchain/go-g1-1270-src/src/runtime/mwbbuf.go toolchain/go-g1-1270-src/src/runtime/mbitmap.go toolchain/go-g1-1270-src/src/runtime/atomic_pointer.go toolchain/go-g1-1270-src/src/runtime/g1gc.go toolchain/go-g1-1270-src/src/runtime/g1gc_evacuate.go toolchain/go-g1-1270-src/src/cmd/compile/internal/ssa/writebarrier.go toolchain/go-g1-1270-src/src/cmd/compile/internal/liveness/plive.go"
+fork_go_files := "toolchain/go-g1-1270-src/src/runtime/mheap.go toolchain/go-g1-1270-src/src/runtime/mgcmark.go toolchain/go-g1-1270-src/src/runtime/mgcmark_greenteagc.go toolchain/go-g1-1270-src/src/runtime/mgcmark_nogreenteagc.go toolchain/go-g1-1270-src/src/runtime/mwbbuf.go toolchain/go-g1-1270-src/src/runtime/mbitmap.go toolchain/go-g1-1270-src/src/runtime/atomic_pointer.go toolchain/go-g1-1270-src/src/runtime/g1gc.go toolchain/go-g1-1270-src/src/runtime/g1gc_evacuate.go toolchain/go-g1-1270-src/src/runtime/mgc.go toolchain/go-g1-1270-src/src/runtime/mgcsweep.go toolchain/go-g1-1270-src/src/runtime/malloc.go toolchain/go-g1-1270-src/src/runtime/mcache.go toolchain/go-g1-1270-src/src/runtime/extern.go toolchain/go-g1-1270-src/src/runtime/runtime1.go toolchain/go-g1-1270-src/src/cmd/compile/internal/ssa/writebarrier.go toolchain/go-g1-1270-src/src/cmd/compile/internal/liveness/plive.go toolchain/go-g1-1270-src/src/cmd/compile/internal/typecheck/builtin.go"
 
 default: verify
 
@@ -119,6 +119,11 @@ bench-trace:
 bench-summary:
     test -f "bench/results/repeated/{{summary_label}}.summary.json"
     jq . "bench/results/repeated/{{summary_label}}.summary.json"
+
+# Correctness stress: repeated diagnostic-trace runs across scenarios.
+# STRESS_ROUNDS/STRESS_DURATION/STRESS_SCENARIOS/STRESS_GODEBUG override.
+stress:
+    CANDIDATE_ROOT="{{candidate_root}}" ./bench/stress.sh
 
 # Rebuild, then run every validation gate used for the real runtime fork.
 verify: check-tools check-format build-toolchain test-runtime test-ssa test-project test-race

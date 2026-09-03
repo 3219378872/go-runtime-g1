@@ -50,6 +50,9 @@ aggregate() {
 			{
 				min: $values[0],
 				median: $values[((($values | length) - 1) / 2) | floor],
+				q1: $values[((($values | length) - 1) * 0.25) | floor],
+				q3: $values[((($values | length) - 1) * 0.75) | ceil],
+				iqr: ($values[((($values | length) - 1) * 0.75) | ceil] - $values[((($values | length) - 1) * 0.25) | floor]),
 				p95: $values[((($values | length) - 1) * 0.95) | ceil],
 				max: $values[-1]
 			};
@@ -77,6 +80,9 @@ paired_ratios=$(jq -s --argjson runs "$repeats" '
 		{
 			min: $values[0],
 			median: $values[((($values | length) - 1) / 2) | floor],
+			q1: $values[((($values | length) - 1) * 0.25) | floor],
+			q3: $values[((($values | length) - 1) * 0.75) | ceil],
+			iqr: ($values[((($values | length) - 1) * 0.75) | ceil] - $values[((($values | length) - 1) * 0.25) | floor]),
 			p95: $values[((($values | length) - 1) * 0.95) | ceil],
 			max: $values[-1]
 		};

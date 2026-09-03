@@ -112,6 +112,12 @@ func (c *mcentral) cacheSpan() *mspan {
 	// Try partial swept spans first.
 	sg := mheap_.sweepgen
 	if s = c.partialSwept(sg).pop(); s != nil {
+		if debug.g1gc != 0 {
+			// Region-aware allocation: prefer refilling from a span in
+			// a dense region so sparse regions drain toward evacuation.
+			// Gated on debug.g1gc; the default path is untouched.
+			s = c.g1PreferDenseSpan(sg, s)
+		}
 		goto havespan
 	}
 

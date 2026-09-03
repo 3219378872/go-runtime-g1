@@ -9,6 +9,150 @@ entry point for format checks, runtime/SSA gates, project tests, race tests,
 and matched official-versus-candidate benchmarks. The benchmark comparator
 is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
 
+## Iteration 2026-09-03c: same-session old-vs-new A/B — feature neutral
+
+Built the pre-change tree separately (`/tmp/opencode/ab/oldroot`,
+pristine `HEAD` sources, own `make.bash`) and ran interleaved A/B
+(`OFFICIAL_GO`=old, candidate=new, same `GODEBUG` both sides,
+alternating within `repeat.sh`, ratio = new/old), 15s n=7:
+
+| label | tp med [min,max] | stw_max | stw_p99 med | gc_cpu | rss_final |
+|---|---|---|---|---|---|
+| ab-p64evac (g1gc+evac) | 1.020 [0.899,1.192] | 0.494 | 0.497 | 1.048 | 1.033 |
+| ab-fragevac (g1gc+evac) | 0.999 [0.927,1.104] | 0.930 | 0.975 | 1.001 | 0.937 |
+| ab-p64default (gate off) | 1.049 [0.999,1.082] | 0.622 | 0.886 | 0.995 | 1.019 |
+| abr-p64default reversed | 1.001 [0.945,1.029] | — | — | 0.985 | — |
+
+Verdict: **no adjudicable feature effect, and the session proves why**.
+The gate-off control moved +4.9% with the feature inert (all 7 runs
+≥0.999), yet the reversed control 10 minutes later reads 1.0005 —
+the setup disagrees with itself, so per 25e discipline the ±5% band
+here is unmeasurable (alignment lottery across two toolchain builds
+plus host drift; alternating pairs cannot cancel either). The active
+rows (+2.0% p64-evac, -0.1% frag-evac) sit inside that envelope, with
+stw tails swinging on single-run spikes both sides (p99 max 18x on one
+ab-p64evac run). gc_cpu is 1.00-1.05 throughout. Nothing replicates in
+either direction: the MVP is performance-neutral within this host's
+capability, with correctness green (verify + 9/9 stress from 0903b).
+
+### Next session
+
+- Only bare metal or a quieter host can adjudicate sub-5% alloc-path
+  effects; on this host, further refill-hint tuning cannot show through.
+- If evacuations must engage harder on frag, the lever is selection
+  policy (reclaim gate / arming), not allocation hints — D04 territory.
+
+## Iteration 2026-09-03b: region-aware allocation MVP (mcentral best-of-N)
+
+Implemented the structural lever named in 2026-08-25c/25e: the fork's
+default allocation path now prefers dense regions on refill.
+
+### Change (all gated on `debug.g1gc`, zero behavior change when off)
+
+- `mcentral.go cacheSpan`: the `partialSwept` first-pop — the common
+  refill path — now passes through `g1PreferDenseSpan` when `debug.g1gc
+  != 0` (3-line hook; `mcentral.go` joins the fork fmt list in
+  `justfile`).
+- `g1gc.go`: `g1PreferDenseSpan` pops up to 7 more spans (bounded
+  `g1AllocChoiceSpans = 8`), keeps the best-ranked, pushes the rest
+  back to the same swept set (list invariant preserved; any returned
+  span satisfies the existing free-space contract). Ranking
+  (`g1SpanAllocRank`): tier 0 dense `live*2 >= used` → pack here;
+  tier 1 untracked/empty → neutral; tier 2 `scanTag`-selected or sparse
+  `live*2 < used` → leave to drain for evacuation. Dense-tier ties
+  break by live fraction via cross-multiplication. Counters are
+  mark-termination hints; refill never runs STW so the STW-only
+  `scanTag` reads cannot race. Cost is one refill per cached span
+  (amortized over hundreds of allocations).
+- Deliberately untouched: unswept sweep paths, `grow`/page-allocator
+  placement, `uncacheSpan` routing — grow-from-dense-pages stays a
+  follow-up (needs `mheap_.alloc` region input, invasive).
+
+### Gates (all green on the rebuilt fork)
+
+`just check-format`, `build-toolchain`, `test-runtime`
+(`TestUnsafePoint|TestGcSys`), `test-ssa`, `test-project`,
+`test-race`, `bench/stress.sh` 9/9 clean (frag/pointer64/alloc ×
+`g1evac=4,g1trace=1`), `g1gc-demo` OK.
+
+### Measurement (`ra1-*`, 15s n=7, vs `matrix-0903` control)
+
+| row | tp | stw_max | stw_p99 | gc_cpu | rss_final |
+|---|---|---|---|---|---|
+| ra1-pointer64-default | 0.992 | 1.007 | 0.855 | 1.099 | 0.984 |
+| ra1-pointer64-evac | 0.964 | 1.005 | 1.312 | 1.044 | 1.063 |
+| ra1-frag-evac | 0.993 | 0.727 | 0.936 | 1.035 | 1.059 |
+
+Verdict per 25e discipline: **no adjudicable effect**. The ra1 session
+ran after matrix-0903 (cross-session, ±3-5% drift band) with no
+same-session A/B; signs are mixed (pointer64 tp down ~2-5% but ranges
+overlap 0.92-1.06 vs 0.93-1.10; frag-evac stw_max improved 0.73 while
+pointer64-evac stw_p99 regressed 1.31; stw_max maxima 4-7x on both
+sides are single-run host spikes). gc_cpu is identical (1.044 vs 1.049
+on pointer64-evac). This is the noise signature, not a systematic
+regression or win — the MVP's effect is below this host's floor, as
+expected for a refill-path hint (uniform pointer64 regions offer
+little density contrast by construction).
+
+### Next session
+
+- Same-session old-vs-new A/B (rebuild pre-change toolchain under a
+  separate CANDIDATE_ROOT, alternate labels) or bare metal before any
+  effect claim; frag-heavy sessions should show the drain benefit first
+  (sparse regions left alone → more low-live candidates).
+- Follow-ups if A/B confirms neutral: grow-time dense-page preference
+  (`mheap_.alloc` region input), sweep-side span routing; both need
+  their own correctness review against `EvacDestHead` lifecycle.
+
+## Iteration 2026-09-03a: standing 15s n=7 matrix — first full-protocol baseline
+
+Ran the standing reference matrix for the first time under the S04
+protocol (`LABEL_PREFIX=matrix-0903`, 15s runs, n=7 alternating, in-tree
+official go1.27.0, GOMAXPROCS=2, CPU_LIST=0,2; run was interrupted after
+6/8 labels and completed with two follow-up `repeat.sh` invocations under
+the same prefix). Preflight passed (offline cores ok, steal 0.00%; VM/WSL
+warnings as usual). Paired medians (candidate/official):
+
+| row | tp | stw_max | stw_p99 | gc_cpu | rss_avg | rss_final |
+|---|---|---|---|---|---|---|
+| pointer64 default | 1.013 | 0.792 | 0.885 | 1.076 | 1.015 | 0.966 |
+| pointer64 evac | 1.017 | 0.818 | 0.880 | 1.049 | 1.027 | 1.018 |
+| pointer256 default | 1.020 | 0.909 | 0.981 | 1.030 | 0.988 | 1.087 |
+| pointer256 evac | 0.965 | 0.888 | 0.917 | 1.003 | 0.973 | 1.017 |
+| alloc default | 1.009 | 1.180 | 0.958 | 1.044 | 1.030 | 1.063 |
+| alloc evac | 0.990 | 0.836 | 0.884 | 1.045 | 0.988 | 0.869 |
+| frag default | 0.974 | 1.015 | 1.066 | 1.031 | 1.007 | 0.994 |
+| frag evac | 0.976 | 1.169 | 1.041 | 1.058 | 1.025 | 1.174 |
+
+Reading (per 25e discipline: median + spread, sign flips = noise):
+
+- pointer64 at parity-or-better on BOTH rows (default 1.013, evac
+  1.017) with stw_max/p99 < 1.0 — first session the fork's default path
+  beats upstream on a pointer workload. But spread is wide (evac tp
+  min 0.930 / max 1.103), so this is not a claim, only a data point;
+  the tp-parity question for pointer-class stays open pending repeat
+  sessions.
+- frag+evac at 0.976 tp, indistinguishable from frag default (0.974):
+  evacuation still does not engage productively on frag in this
+  session, consistent with the engagement boundary from 2026-08-25b.
+- frag-evac rss_final 1.174 (min 0.964 / max 1.277) flips sign within
+  the session — noise per discipline, not a memory regression signal.
+  alloc-evac rss_final 0.869 likewise has a 0.51 min outlier; memory
+  stays at parity overall.
+- gc_cpu remains 1.00-1.08 everywhere: the known residual overhead,
+  unchanged.
+
+Correctness held: `bench/stress.sh` defaults 9/9 clean (frag,
+pointer64, alloc × `g1evac=4,g1trace=1`).
+
+### Next session
+
+- Region-aware allocation in the fork's default path (the structural
+  lever named in 2026-08-25c/25e for pointer-class tp parity), measured
+  against THIS matrix as the control.
+- Re-run at least pointer64 default/evac + frag evac at 15s n=7 after
+  the change before any claim.
+
 ## Iteration 2026-08-25e: base-RSS elevation retracted — metric discipline
 
 Follow-up on 2026-08-25d item 4 (fork binaries carry 29.6 MB BSS vs

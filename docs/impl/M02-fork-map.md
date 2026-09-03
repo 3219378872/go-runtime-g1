@@ -16,5 +16,6 @@ ID: M02。覆盖 D01-D04。证据：E01#verify-runtime, E03#stress, E02#matrix�
 - engagement: `g1gc_evacuate.go:68 g1gcEvacThreshold`、`99 g1gcNoteIdleWindow`、`109 g1gcCommitProductiveWindow`、`461 g1gcTagLowLiveRegions`、`516 g1gcEvacuate`。
 - rewrite/roots: `g1gc_evacuate.go:139 g1gcDrainPendingWBSlots`、`860 g1gcVerifyFullRewrite`、`939 g1gcUpdateRoots`、`960 g1gcRescanStacks`、`1119 g1gcRewriteSpan`、`1134 g1gcClearSourceBits`。
 - worker 别名坑：`mgc.go gcBgMarkWorkerNode` 须 `persistentalloc+tagAlign`（lfstack 512B 对齐），见 NOTE 2026-08-25 Fix 3。
+- dense-refill: `mcentral.go:114 cacheSpan` partialSwept 首 pop 经 `g1gc.go:562 g1PreferDenseSpan`（`g1AllocChoiceSpans=8` 有界，`g1SpanAllocRank/g1AllocRankBetter` 三档），`debug.g1gc` 门控；见 D05，NOTE 2026-09-03b。
 
 证据：E01 `build-toolchain/test-runtime/test-ssa`；E03 frag stress；E02 各 label 矩阵。

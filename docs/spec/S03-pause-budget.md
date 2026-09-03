@@ -1,6 +1,6 @@
 # S03 暂停预算契约
 
-ID: S03。上游：I01, I03。下游：D04。实现：M01#collect-select, M02#threshold。证据：E02#b1270/p1b/p2。
+ID: S03。上游：I01, I03。下游：D04, D05。实现：M01#collect-select, M02#threshold。证据：E02#b1270/p1b/p2。
 
 ## Given/When/Then
 

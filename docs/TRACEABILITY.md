@@ -11,6 +11,7 @@
 | I02 | S04 | — | M03#bench-harness | E01#preflight, E02#matrix |
 | I03 | S04 | — | M03#repeat-compare | E02#p3-frag-mem, E02#b1270 |
 | I03 | S02 | D02 | M02#sticky-publish | E03#trace-g1evac4 |
+| I03 | S03 | D05 | M02#dense-refill | E02#ra1 |
 
 ## 校验规则
 

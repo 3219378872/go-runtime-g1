@@ -1,5 +1,7 @@
 # Rebase plan: G1 fork onto go1.26.1
 
+> 迁移状态：本文件为 rebase 档案，保留全文。GreenTea 适配事实已迁移至 `docs/impl/M02-fork-map.md`，对照见 `docs/README.md#迁移对照`。
+
 Status: SUPERSEDED (2026-08-24). The active fork is
 `toolchain/go-g1-1270-src` (go1.27.0); see REBASE-1.27.md. This document's
 port notes remain accurate for how the hooks map onto 1.26-era internals,

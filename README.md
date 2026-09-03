@@ -1,5 +1,7 @@
 # Go Runtime G1
 
+> 知识库入口：结构化知识见 `docs/`（意图/规格/设计/实现/证据五层，对照见 `docs/README.md#迁移对照`）。本文件保留项目入口与命令说明。
+
 This repository contains a standalone object-heap runtime that implements the
 main algorithms used by a JVM G1 collector:
 

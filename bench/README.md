@@ -1,5 +1,7 @@
 # Runtime benchmark harness
 
+> 迁移状态：协议与组件索引已迁移至 `docs/spec/S04-bench-protocol.md` 与 `docs/impl/M03-bench-map.md`。本文件保留 harness 说明，行为以脚本为准。
+
 The workload is compiled twice from the same source: once with the official
 Go toolchain and once with a candidate GOROOT. Both runs use the same
 `GOMAXPROCS`, `GOGC`, `GOMEMLIMIT`, CPU affinity, duration, scenario, worker

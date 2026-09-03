@@ -1,5 +1,7 @@
 # Current State
 
+> 迁移状态：本文件为原始迭代日志档案（append-only），保留全文。结构化结论已迁移至 `docs/` 五层知识库，解读以 `docs/` 为准：意图 `docs/intent/`、规格 `docs/spec/`、设计 `docs/design/`、实现 `docs/impl/M02-fork-map.md`、证据 `docs/evidence/`，对照见 `docs/README.md#迁移对照`。
+
 This checkout contains a real Go runtime fork under
 `toolchain/go-g1-1270-src` (go1.27.0-based; the older go1.26.6 and
 go1.26.1 trees are kept for reference). The root `justfile` is the supported

@@ -3,19 +3,24 @@ package g1gc
 import "sort"
 
 func (h *Heap) UsedBytes() int64 {
-	h.world.RLock()
-	defer h.world.RUnlock()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.usedBytesLocked()
+	var used int64
+	h.withReader(func() { used = h.usedBytesLocked() })
+	return used
 }
 
 // RegionSnapshot returns a consistent snapshot of all heap regions.
 func (h *Heap) RegionSnapshot() []RegionInfo {
-	h.world.RLock()
-	defer h.world.RUnlock()
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	var out []RegionInfo
+	h.withReader(func() {
+		out = h.regionSnapshotLocked()
+	})
+	return out
+}
+
+// regionSnapshotLocked renders every region while the caller holds the read
+// guard. Extracted so the guard stanza appears once per API, not once per
+// loop.
+func (h *Heap) regionSnapshotLocked() []RegionInfo {
 	out := make([]RegionInfo, 0, len(h.regions))
 	for _, r := range h.regions {
 		remembered := make([]RegionID, 0, len(r.rememberedFrom))
@@ -47,36 +52,35 @@ func (h *Heap) RegionSnapshot() []RegionInfo {
 
 // RememberedSet returns source regions recorded for a target region.
 func (h *Heap) RememberedSet(id RegionID) ([]RegionID, error) {
-	h.world.RLock()
-	defer h.world.RUnlock()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	r, err := h.regionLocked(id)
+	var ids []RegionID
+	err := h.withReaderErr(func() error {
+		r, err := h.regionLocked(id)
+		if err != nil {
+			return err
+		}
+		ids = make([]RegionID, 0, len(r.rememberedFrom))
+		for source := range r.rememberedFrom {
+			ids = append(ids, source)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]RegionID, 0, len(r.rememberedFrom))
-	for source := range r.rememberedFrom {
-		ids = append(ids, source)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return ids, nil
 }
 
 // RegionCount returns the fixed number of regions in the heap.
 func (h *Heap) RegionCount() int {
-	h.world.RLock()
-	defer h.world.RUnlock()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.regions)
+	var n int
+	h.withReader(func() { n = len(h.regions) })
+	return n
 }
 
 // ObjectCount returns the number of current live objects.
 func (h *Heap) ObjectCount() int {
-	h.world.RLock()
-	defer h.world.RUnlock()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.objects)
+	var n int
+	h.withReader(func() { n = len(h.objects) })
+	return n
 }

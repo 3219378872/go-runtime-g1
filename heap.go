@@ -130,28 +130,44 @@ func (h *Heap) resolveLocked(id ObjectID) ObjectID {
 	// Bounded to avoid hanging on a corrupted cycle.
 	const maxChain = 64
 	var path []ObjectID
+	cur := id
 	for steps := 0; steps < maxChain; steps++ {
-		next, ok := h.forward[id]
+		next, ok := h.forward[cur]
 		if !ok || next == NullObject {
-			for _, p := range path {
-				h.forward[p] = id
-			}
-			return id
+			h.compressForwardPathLocked(path, cur)
+			return cur
 		}
-		if next == id {
+		if next == cur {
 			return NullObject
 		}
-		path = append(path, id)
-		id = next
+		path = append(path, cur)
+		cur = next
 		// Fast exit: tail has no further forwarding.
-		if _, ok := h.forward[id]; !ok {
-			for _, p := range path {
-				h.forward[p] = id
-			}
-			return id
+		if _, ok := h.forward[cur]; !ok {
+			h.compressForwardPathLocked(path, cur)
+			return cur
 		}
 	}
 	return NullObject
+}
+
+// compressForwardPathLocked points every visited predecessor at the resolved
+// tail so repeat resolves of old handles stay O(1) amortized.
+func (h *Heap) compressForwardPathLocked(path []ObjectID, tail ObjectID) {
+	for _, p := range path {
+		h.forward[p] = tail
+	}
+}
+
+// allocIDLocked hands out the next stable object handle, skipping the null
+// handle value so NullObject never aliases a live object.
+func (h *Heap) allocIDLocked() ObjectID {
+	id := h.nextID
+	h.nextID++
+	if h.nextID == NullObject {
+		h.nextID++
+	}
+	return id
 }
 
 func (h *Heap) objectLocked(id ObjectID) (*object, error) {
@@ -171,25 +187,27 @@ func (h *Heap) regionLocked(id RegionID) (*region, error) {
 }
 
 func (h *Heap) State() Phase {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.state
+	var state Phase
+	h.withReader(func() { state = h.state })
+	return state
 }
 
 func (h *Heap) Config() Config {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.config
+	var cfg Config
+	h.withReader(func() { cfg = h.config })
+	return cfg
 }
 
 func (h *Heap) LastStats() Stats {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return cloneStats(h.lastStats)
+	var stats Stats
+	h.withReader(func() { stats = cloneStats(h.lastStats) })
+	return stats
 }
 
 func (h *Heap) String() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return fmt.Sprintf("g1 heap: regions=%d objects=%d used=%d phase=%s", len(h.regions), len(h.objects), h.usedBytesLocked(), h.state)
+	var s string
+	h.withReader(func() {
+		s = fmt.Sprintf("g1 heap: regions=%d objects=%d used=%d phase=%s", len(h.regions), len(h.objects), h.usedBytesLocked(), h.state)
+	})
+	return s
 }

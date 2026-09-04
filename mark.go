@@ -54,7 +54,7 @@ func (h *Heap) runConcurrentMark(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			h.mu.Lock()
-			h.mark.cancelled = true
+			h.mark.cancel()
 			h.markCond.Broadcast()
 			h.mu.Unlock()
 		case <-watchDone:
@@ -65,11 +65,11 @@ func (h *Heap) runConcurrentMark(ctx context.Context) error {
 	watcher.Wait()
 
 	h.mu.Lock()
-	cancelled := h.mark.cancelled
+	cancelled := h.mark.isCancelled()
 	h.mu.Unlock()
 	if cancelled || ctx.Err() != nil {
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("%w: %v", ErrContextCancelled, err)
+			return fmt.Errorf("%w: %s", ErrContextCancelled, err)
 		}
 		return ErrContextCancelled
 	}
@@ -80,70 +80,90 @@ func (h *Heap) markWorker(ctx context.Context) {
 	// Per-worker batch buffer reused across iterations to avoid clones.
 	batch := make([]ObjectID, 0, 32)
 	for {
+		if h.cancelMarkIfDone(ctx) {
+			return
+		}
+		refs, ok := h.takeMarkBatch(ctx, batch)
+		if !ok {
+			return
+		}
+		h.publishMarkRefs(refs)
+	}
+}
+
+// cancelMarkIfDone flags global cancellation when ctx is done and reports
+// whether the caller must stop.
+func (h *Heap) cancelMarkIfDone(ctx context.Context) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	h.mu.Lock()
+	h.mark.cancel()
+	h.markCond.Broadcast()
+	h.mu.Unlock()
+	return true
+}
+
+// takeMarkBatch waits for queued work, pops one batch with its references
+// snapshotted, and records the in-flight scanner. It reports false when the
+// mark closure is complete or cancelled, in which case the caller returns.
+// A later mutator update after a complete closure is handled by SATB during
+// remark.
+func (h *Heap) takeMarkBatch(ctx context.Context, batch []ObjectID) ([]ObjectID, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for !h.mark.hasQueuedWork() && !h.mark.isQuiescent() && !h.mark.isCancelled() {
+		h.markCond.Wait()
 		if ctx.Err() != nil {
-			h.mu.Lock()
-			h.mark.cancelled = true
+			h.mark.cancel()
 			h.markCond.Broadcast()
-			h.mu.Unlock()
-			return
 		}
+	}
+	if h.mark.isCancelled() || ctx.Err() != nil {
+		h.mark.cancel()
+		h.markCond.Broadcast()
+		return nil, false
+	}
+	if !h.mark.hasQueuedWork() {
+		return nil, false
+	}
+	// Pop a batch and snapshot refs under a single critical section.
+	// Batch is bounded (<=32 objects) so the section stays short.
+	batch = h.mark.popBatch(batch)
+	h.mark.trackStart()
+	var refs []ObjectID
+	for _, id := range batch {
+		if obj, ok := h.objects[h.resolveLocked(id)]; ok {
+			refs = append(refs, obj.refs...)
+		}
+	}
+	return refs, true
+}
 
-		h.mu.Lock()
-		for len(h.mark.queue) == 0 && h.mark.active > 0 && !h.mark.cancelled {
-			h.markCond.Wait()
-			if ctx.Err() != nil {
-				h.mark.cancelled = true
-				h.markCond.Broadcast()
+// publishMarkRefs enqueues newly discovered references and retires one
+// in-flight scanner, waking waiters when the closure completes.
+func (h *Heap) publishMarkRefs(refs []ObjectID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.mark.isCancelled() {
+		needSignal := false
+		for _, ref := range refs {
+			if ref == NullObject {
+				continue
 			}
-		}
-		if h.mark.cancelled || ctx.Err() != nil {
-			h.mark.cancelled = true
-			h.markCond.Broadcast()
-			h.mu.Unlock()
-			return
-		}
-		if len(h.mark.queue) == 0 {
-			// No queued work and no active scanner means the mark closure is
-			// complete at this point. A later mutator update is handled by SATB
-			// during remark.
-			h.mu.Unlock()
-			return
-		}
-		// Pop a batch under a single critical section and snapshot refs
-		// inline (one lock instead of pop + snapshotRefs's extra lock).
-		batch = h.mark.popBatch(batch)
-		h.mark.active++
-		// Snapshot refs while still holding the lock. Batch is bounded
-		// (<=32 objects) so the critical section stays short.
-		var refs []ObjectID
-		for _, id := range batch {
-			if obj, ok := h.objects[h.resolveLocked(id)]; ok {
-				refs = append(refs, obj.refs...)
-			}
-		}
-		h.mu.Unlock()
-
-		h.mu.Lock()
-		if !h.mark.cancelled {
-			wasEmpty := len(h.mark.queue) == 0
-			for _, ref := range refs {
-				if ref == NullObject {
-					continue
-				}
-				rid := h.resolveLocked(ref)
-				if obj, ok := h.objects[rid]; ok && h.mark.mark(obj) {
-					h.mark.queue = append(h.mark.queue, rid)
+			rid := h.resolveLocked(ref)
+			if obj, ok := h.objects[rid]; ok && h.mark.mark(obj) {
+				if h.mark.push(rid) {
+					needSignal = true
 				}
 			}
-			if wasEmpty && len(h.mark.queue) > 0 {
-				h.markCond.Signal()
-			}
 		}
-		h.mark.active--
-		if len(h.mark.queue) == 0 && h.mark.active == 0 {
-			h.markCond.Broadcast()
+		if needSignal {
+			h.markCond.Signal()
 		}
-		h.mu.Unlock()
+	}
+	if h.mark.trackDone() {
+		h.markCond.Broadcast()
 	}
 }
 

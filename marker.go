@@ -105,3 +105,39 @@ func (m *marker) popBatch(batch []ObjectID) []ObjectID {
 func (m *marker) recordSATB(id ObjectID) {
 	m.satb = append(m.satb, id)
 }
+
+// isCancelled reports the cancellation flag. The caller must hold Heap.mu.
+func (m *marker) isCancelled() bool {
+	return m.cancelled
+}
+
+// cancel flags cancellation. The caller must hold Heap.mu and broadcast on
+// the mark condition so waiters re-check.
+func (m *marker) cancel() {
+	m.cancelled = true
+}
+
+// hasQueuedWork reports whether the mark queue holds unscanned objects.
+// The caller must hold Heap.mu.
+func (m *marker) hasQueuedWork() bool {
+	return len(m.queue) > 0
+}
+
+// isQuiescent reports an empty queue with no in-flight scanners, meaning
+// the mark closure is complete. The caller must hold Heap.mu.
+func (m *marker) isQuiescent() bool {
+	return len(m.queue) == 0 && m.active == 0
+}
+
+// trackStart records one in-flight scanner. The caller must hold Heap.mu.
+func (m *marker) trackStart() {
+	m.active++
+}
+
+// trackDone retires one in-flight scanner and reports whether the machine
+// is quiescent, in which case the caller broadcasts. The caller must hold
+// Heap.mu.
+func (m *marker) trackDone() bool {
+	m.active--
+	return m.isQuiescent()
+}

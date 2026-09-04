@@ -6,10 +6,6 @@ import (
 	"time"
 )
 
-func (h *Heap) phaseLocked(phase Phase) {
-	h.state = phase
-}
-
 // stw runs fn with the world write gate and mu held, so every public mutator
 // waits while STW snapshots change. It replaces the repeated
 // world.Lock/mu.Lock/unlock blocks of the stop-the-world phases.
@@ -31,7 +27,7 @@ func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
 	defer h.cycleMu.Unlock()
 
 	if err := ctx.Err(); err != nil {
-		return Stats{}, fmt.Errorf("%w: %v", ErrContextCancelled, err)
+		return Stats{}, fmt.Errorf("%w: %s", ErrContextCancelled, err)
 	}
 
 	h.world.Lock()
@@ -53,7 +49,7 @@ func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
 		BeforeUsedBytes: h.usedBytesLocked(),
 		PhaseDurations:  make(map[Phase]time.Duration),
 	}
-	h.phaseLocked(PhaseInitialMark)
+	h.state = PhaseInitialMark
 	initialStart := time.Now()
 	h.beginMarkingLocked()
 	h.mu.Unlock()
@@ -62,7 +58,7 @@ func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
 	stats.PhaseDurations[PhaseInitialMark] = time.Since(initialStart)
 
 	h.mu.Lock()
-	h.phaseLocked(PhaseConcurrentMark)
+	h.state = PhaseConcurrentMark
 	h.mu.Unlock()
 	concurrentStart := time.Now()
 	err := h.runConcurrentMark(ctx)
@@ -77,14 +73,14 @@ func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
 
 	if err := ctx.Err(); err != nil {
 		h.abortCycle()
-		return stats, fmt.Errorf("%w: %v", ErrContextCancelled, err)
+		return stats, fmt.Errorf("%w: %s", ErrContextCancelled, err)
 	}
 
 	// Remark, cleanup, and evacuation are stop-the-world phases. The shared
 	// mutex makes every public mutator wait while these snapshots change.
 	var remarkStart time.Time
 	h.stw(func() {
-		h.phaseLocked(PhaseRemark)
+		h.state = PhaseRemark
 		remarkStart = time.Now()
 		h.finishMarkingLocked()
 		h.collectMarkStatsLocked(&stats)
@@ -94,12 +90,12 @@ func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
 
 	if err := ctx.Err(); err != nil {
 		h.abortCycle()
-		return stats, fmt.Errorf("%w: %v", ErrContextCancelled, err)
+		return stats, fmt.Errorf("%w: %s", ErrContextCancelled, err)
 	}
 
 	var cleanupStart time.Time
 	h.stw(func() {
-		h.phaseLocked(PhaseCleanup)
+		h.state = PhaseCleanup
 		cleanupStart = time.Now()
 		h.cleanupLocked(&stats)
 	})
@@ -108,13 +104,13 @@ func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
 
 	if err := ctx.Err(); err != nil {
 		h.abortCycle()
-		return stats, fmt.Errorf("%w: %v", ErrContextCancelled, err)
+		return stats, fmt.Errorf("%w: %s", ErrContextCancelled, err)
 	}
 
 	var evacuationStart time.Time
 	var evacuationErr error
 	h.stw(func() {
-		h.phaseLocked(PhaseEvacuation)
+		h.state = PhaseEvacuation
 		evacuationStart = time.Now()
 		evacuationErr = h.evacuateLocked(&stats)
 		h.finishCycleLocked(&stats)

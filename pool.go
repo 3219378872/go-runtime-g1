@@ -89,7 +89,7 @@ func (p *freePool) reset() {
 
 // activeCache remembers one non-full region per normal kind (Eden, Survivor,
 // Old) so repeated allocation hits O(1) without scanning all regions.
-type activeCache [6]RegionID
+type activeCache [numRegionKinds]RegionID
 
 func (a *activeCache) reset() {
 	for i := range a {

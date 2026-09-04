@@ -9,7 +9,8 @@
 //
 // Layout (one concern per file, low coupling, high cohesion):
 //
-//	Heap lifecycle and locking discipline: heap.go (state), cycle.go (Collect/GC)
+//	Heap lifecycle and locking discipline: heap.go (state), guards.go (read
+//	guards), cycle.go (Collect/GC)
 //	Configuration and identities: config.go, id.go, errors.go
 //	Heap data model: object.go, region.go, stats.go
 //	Mutator paths: alloc.go (allocation), pool.go (free pool, active cache,
@@ -24,7 +25,9 @@
 //
 // Locking discipline: mu guards every field of Heap. world is a
 // stop-the-world gate — mutators hold world.RLock, STW phases hold
-// world.Lock. cycleMu serializes whole Collect calls. Methods whose names
-// end in Locked require the caller to hold mu (and world as documented at
-// the call site).
+// world.Lock. cycleMu serializes whole Collect calls. Public APIs acquire
+// locks only through guards.go (withReader/withReaderErr) or the STW helper
+// cycle.go (stw); allocation and collection orchestration spell the order
+// explicitly. Methods whose names end in Locked require the caller to hold
+// mu (and world as documented at the call site).
 package g1gc

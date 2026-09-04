@@ -6,14 +6,12 @@ import "fmt"
 // intentionally available to integration tests and diagnostics; production
 // callers do not need to run it on every mutator operation.
 func (h *Heap) Validate() error {
-	h.world.RLock()
-	defer h.world.RUnlock()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if err := h.checkOpenLocked(); err != nil {
-		return err
-	}
-	return h.validateLocked()
+	return h.withReaderErr(func() error {
+		if err := h.checkOpenLocked(); err != nil {
+			return err
+		}
+		return h.validateLocked()
+	})
 }
 
 func (h *Heap) validateLocked() error {

@@ -32,6 +32,9 @@ func (k RegionKind) String() string {
 	}
 }
 
+// numRegionKinds sizes fixed per-kind tables such as the active-region cache.
+const numRegionKinds = 6
+
 type region struct {
 	id             RegionID
 	kind           RegionKind
@@ -52,23 +55,17 @@ func (r *region) reset() {
 	if r.objects == nil {
 		r.objects = make(map[ObjectID]struct{})
 	} else {
-		for id := range r.objects {
-			delete(r.objects, id)
-		}
+		clear(r.objects)
 	}
 	if r.rememberedFrom == nil {
 		r.rememberedFrom = make(map[RegionID]struct{})
 	} else {
-		for id := range r.rememberedFrom {
-			delete(r.rememberedFrom, id)
-		}
+		clear(r.rememberedFrom)
 	}
 	if r.rememberedTo == nil {
 		r.rememberedTo = make(map[RegionID]struct{})
 	} else {
-		for id := range r.rememberedTo {
-			delete(r.rememberedTo, id)
-		}
+		clear(r.rememberedTo)
 	}
 	r.span = 0
 	r.lastLiveBytes = 0

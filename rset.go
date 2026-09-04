@@ -44,9 +44,7 @@ func (x *rsetIndex) remove(src, dst RegionID) bool {
 }
 
 func (x *rsetIndex) clear() {
-	for k := range x.counts {
-		delete(x.counts, k)
-	}
+	clear(x.counts)
 }
 
 // rsAddEdgeForSlotLocked adds one slot's cross-region edge in O(1).
@@ -105,16 +103,12 @@ func (h *Heap) rebuildRememberedSetsLocked() {
 		if r.rememberedFrom == nil {
 			r.rememberedFrom = make(map[RegionID]struct{})
 		} else {
-			for s := range r.rememberedFrom {
-				delete(r.rememberedFrom, s)
-			}
+			clear(r.rememberedFrom)
 		}
 		if r.rememberedTo == nil {
 			r.rememberedTo = make(map[RegionID]struct{})
 		} else {
-			for t := range r.rememberedTo {
-				delete(r.rememberedTo, t)
-			}
+			clear(r.rememberedTo)
 		}
 	}
 	h.rset.clear()

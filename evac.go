@@ -29,11 +29,7 @@ func (h *Heap) allocateEvacuationCopyLocked(src *object, targetKind RegionKind, 
 	if r == nil {
 		return nil, false
 	}
-	id := h.nextID
-	h.nextID++
-	if h.nextID == NullObject {
-		h.nextID++
-	}
+	id := h.allocIDLocked()
 	age := src.age
 	if src.humongous || src.region >= 0 && (h.regions[src.region].kind == RegionEden || h.regions[src.region].kind == RegionSurvivor) {
 		if age < 255 {
@@ -59,8 +55,49 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 	if len(cset) == 0 {
 		return nil
 	}
-	failed := make(map[RegionID]bool)
-	destSet := make(map[RegionID]bool)
+	failed, destSet := h.copyCollectionSetLocked(cset, stats)
+	if stats.MovedObjects == 0 {
+		// Nothing moved: no reference can be stale. Still rebuild roots
+		// canonically (cheap) and skip the rewrite scan entirely.
+		h.canonicalizeRootsLocked()
+	} else {
+		h.rewriteForwardedRefsLocked(cset, destSet)
+	}
+	h.reclaimCollectionSetLocked(cset, failed, stats)
+
+	for id := range failed {
+		stats.FailedRegions = append(stats.FailedRegions, id)
+	}
+	sort.Slice(stats.FailedRegions, func(i, j int) bool { return stats.FailedRegions[i] < stats.FailedRegions[j] })
+	// RSet rebuild deferred to finishCycleLocked (single rebuild per cycle).
+	if len(failed) > 0 {
+		return ErrEvacuationFailure
+	}
+	return nil
+}
+
+// evacTargetKind selects the survivor generation for src: young objects
+// below the tenuring threshold stay in Survivor, everything else goes Old.
+func (h *Heap) evacTargetKind(src *object, from RegionKind) RegionKind {
+	if from != RegionEden && from != RegionSurvivor {
+		return RegionOld
+	}
+	nextAge := src.age
+	if nextAge < 255 {
+		nextAge++
+	}
+	if nextAge < h.config.MaxTenuringAge {
+		return RegionSurvivor
+	}
+	return RegionOld
+}
+
+// copyCollectionSetLocked copies every movable object out of cset, records
+// forwarding, and reports failed source regions plus copy destination
+// regions for the rewrite filter.
+func (h *Heap) copyCollectionSetLocked(cset map[RegionID]bool, stats *Stats) (failed, destSet map[RegionID]bool) {
+	failed = make(map[RegionID]bool)
+	destSet = make(map[RegionID]bool)
 	for _, r := range h.regions {
 		if !cset[r.id] {
 			continue
@@ -74,16 +111,7 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 				failed[r.id] = true
 				continue
 			}
-			targetKind := RegionOld
-			if r.kind == RegionEden || r.kind == RegionSurvivor {
-				nextAge := src.age
-				if nextAge < 255 {
-					nextAge++
-				}
-				if nextAge < h.config.MaxTenuringAge {
-					targetKind = RegionSurvivor
-				}
-			}
+			targetKind := h.evacTargetKind(src, r.kind)
 			copyObj, copied := h.allocateEvacuationCopyLocked(src, targetKind, cset)
 			if !copied && targetKind == RegionSurvivor {
 				copyObj, copied = h.allocateEvacuationCopyLocked(src, RegionOld, cset)
@@ -98,14 +126,14 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 			destSet[copyObj.region] = true
 		}
 	}
-	if stats.MovedObjects == 0 {
-		// Nothing moved: no reference can be stale. Still rebuild roots
-		// canonically (cheap) and skip the rewrite scan entirely.
-		h.canonicalizeRootsLocked()
-	} else {
-		h.rewriteForwardedRefsLocked(cset, destSet)
-	}
+	return failed, destSet
+}
 
+// reclaimCollectionSetLocked drops evacuated sources and frees fully
+// evacuated regions. A young region that cannot be fully evacuated is
+// retained as old; the next cycle can retry after reserve space becomes
+// available.
+func (h *Heap) reclaimCollectionSetLocked(cset, failed map[RegionID]bool, stats *Stats) {
 	for _, r := range h.regions {
 		if !cset[r.id] {
 			continue
@@ -123,8 +151,6 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 			}
 		}
 		if failed[r.id] {
-			// A young region that cannot be fully evacuated is retained as old;
-			// the next cycle can retry after reserve space becomes available.
 			if r.kind == RegionEden || r.kind == RegionSurvivor {
 				h.clearActiveLocked(r.id)
 				r.kind = RegionOld
@@ -138,16 +164,6 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 		h.freeRegionLocked(r)
 		stats.FreedRegions++
 	}
-
-	for id := range failed {
-		stats.FailedRegions = append(stats.FailedRegions, id)
-	}
-	sort.Slice(stats.FailedRegions, func(i, j int) bool { return stats.FailedRegions[i] < stats.FailedRegions[j] })
-	// RSet rebuild deferred to finishCycleLocked (single rebuild per cycle).
-	if len(failed) > 0 {
-		return ErrEvacuationFailure
-	}
-	return nil
 }
 
 // rewriteForwardedRefsLocked canonicalizes every reference that may point
@@ -191,13 +207,7 @@ func (h *Heap) rewriteForwardedRefsLocked(cset, destSet map[RegionID]bool) {
 	}
 	if affectedObjects*2 >= len(h.objects) {
 		for _, obj := range h.objects {
-			for i, ref := range obj.refs {
-				if ref != NullObject {
-					if resolved := h.resolveLocked(ref); resolved != ref {
-						obj.refs[i] = resolved
-					}
-				}
-			}
+			h.rewriteObjectRefsLocked(obj)
 		}
 		return
 	}
@@ -211,12 +221,18 @@ func (h *Heap) rewriteForwardedRefsLocked(cset, destSet map[RegionID]bool) {
 			if !ok {
 				continue
 			}
-			for i, ref := range obj.refs {
-				if ref != NullObject {
-					if resolved := h.resolveLocked(ref); resolved != ref {
-						obj.refs[i] = resolved
-					}
-				}
+			h.rewriteObjectRefsLocked(obj)
+		}
+	}
+}
+
+// rewriteObjectRefsLocked resolves every reference slot through the
+// forwarding table in place.
+func (h *Heap) rewriteObjectRefsLocked(obj *object) {
+	for i, ref := range obj.refs {
+		if ref != NullObject {
+			if resolved := h.resolveLocked(ref); resolved != ref {
+				obj.refs[i] = resolved
 			}
 		}
 	}

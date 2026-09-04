@@ -72,31 +72,36 @@ func (h *Heap) allocateObject(size int64, slots int, refs []ObjectID) (ObjectID,
 		refs = nil
 	}
 
-	for attempt := 0; attempt < 2; attempt++ {
-		h.world.RLock()
-		h.mu.Lock()
-		if err := h.checkOpenLocked(); err != nil {
-			h.mu.Unlock()
-			h.world.RUnlock()
-			return NullObject, err
-		}
-		id, err := h.allocateLocked(size, refs)
-		state := h.state
-		h.mu.Unlock()
-		h.world.RUnlock()
-		if err == nil {
-			return id, nil
-		}
-		if !errors.Is(err, ErrOutOfMemory) || state != PhaseIdle || attempt != 0 {
-			return NullObject, err
-		}
-		// Allocation failure is the normal trigger for a stop-the-world G1
-		// cycle. A failed evacuation is recoverable, so retry the allocation.
-		if _, gcErr := h.GC(); gcErr != nil && !errors.Is(gcErr, ErrEvacuationFailure) {
-			return NullObject, gcErr
-		}
+	// Allocation failure is the normal trigger for a stop-the-world G1
+	// cycle. A failed evacuation is recoverable, so retry the allocation
+	// once after a collection.
+	id, err := h.allocateOnce(size, refs)
+	if err == nil {
+		return id, nil
 	}
-	return NullObject, ErrOutOfMemory
+	var idleAtFailure bool
+	h.withReader(func() { idleAtFailure = h.state == PhaseIdle })
+	if !errors.Is(err, ErrOutOfMemory) || !idleAtFailure {
+		return NullObject, err
+	}
+	if _, gcErr := h.GC(); gcErr != nil && !errors.Is(gcErr, ErrEvacuationFailure) {
+		return NullObject, gcErr
+	}
+	return h.allocateOnce(size, refs)
+}
+
+// allocateOnce attempts a single allocation without triggering a collection.
+func (h *Heap) allocateOnce(size int64, refs []ObjectID) (ObjectID, error) {
+	var id ObjectID
+	err := h.withReaderErr(func() error {
+		if err := h.checkOpenLocked(); err != nil {
+			return err
+		}
+		var allocErr error
+		id, allocErr = h.allocateLocked(size, refs)
+		return allocErr
+	})
+	return id, err
 }
 
 func (h *Heap) allocateLocked(size int64, refs []ObjectID) (ObjectID, error) {
@@ -112,31 +117,36 @@ func (h *Heap) allocateLocked(size int64, refs []ObjectID) (ObjectID, error) {
 		canonicalRefs[i] = ref
 	}
 
-	id := h.nextID
-	h.nextID++
-	if h.nextID == NullObject {
-		h.nextID++
-	}
 	if size <= h.config.RegionSize/2 {
-		r := h.findNormalRegionLocked(size, RegionEden, nil)
-		if r == nil {
-			return NullObject, ErrOutOfMemory
-		}
-		obj := &object{
-			id:     id,
-			size:   size,
-			refs:   canonicalRefs,
-			region: r.id,
-		}
-		h.objects[id] = obj
-		r.objects[id] = struct{}{}
-		r.used += size
-		h.alloc.addUsed(size)
-		h.applyAllocationBarrierLocked(obj)
-		h.recordAllocRememberedLocked(obj)
-		return id, nil
+		return h.allocNormalLocked(size, canonicalRefs)
 	}
+	return h.allocHumongousLocked(size, canonicalRefs)
+}
 
+// allocNormalLocked places a regular object into an Eden region.
+func (h *Heap) allocNormalLocked(size int64, refs []ObjectID) (ObjectID, error) {
+	r := h.findNormalRegionLocked(size, RegionEden, nil)
+	if r == nil {
+		return NullObject, ErrOutOfMemory
+	}
+	id := h.allocIDLocked()
+	obj := &object{
+		id:     id,
+		size:   size,
+		refs:   refs,
+		region: r.id,
+	}
+	h.objects[id] = obj
+	r.objects[id] = struct{}{}
+	r.used += size
+	h.alloc.addUsed(size)
+	h.applyAllocationBarrierLocked(obj)
+	h.recordAllocRememberedLocked(obj)
+	return id, nil
+}
+
+// allocHumongousLocked places a large object across a contiguous free span.
+func (h *Heap) allocHumongousLocked(size int64, refs []ObjectID) (ObjectID, error) {
 	start, span := h.findHumongousSpanLocked(size)
 	if start < 0 {
 		return NullObject, ErrOutOfMemory
@@ -145,10 +155,11 @@ func (h *Heap) allocateLocked(size int64, refs []ObjectID) (ObjectID, error) {
 		h.claimFreeAtLocked(start + i)
 		h.clearActiveLocked(RegionID(start + i))
 	}
+	id := h.allocIDLocked()
 	obj := &object{
 		id:        id,
 		size:      size,
-		refs:      canonicalRefs,
+		refs:      refs,
 		region:    RegionID(start),
 		humongous: true,
 		span:      span,
@@ -217,23 +228,17 @@ func (h *Heap) findNormalRegionLocked(size int64, kind RegionKind, excluded map[
 	if r.objects == nil {
 		r.objects = make(map[ObjectID]struct{})
 	} else {
-		for id := range r.objects {
-			delete(r.objects, id)
-		}
+		clear(r.objects)
 	}
 	if r.rememberedFrom == nil {
 		r.rememberedFrom = make(map[RegionID]struct{})
 	} else {
-		for id := range r.rememberedFrom {
-			delete(r.rememberedFrom, id)
-		}
+		clear(r.rememberedFrom)
 	}
 	if r.rememberedTo == nil {
 		r.rememberedTo = make(map[RegionID]struct{})
 	} else {
-		for id := range r.rememberedTo {
-			delete(r.rememberedTo, id)
-		}
+		clear(r.rememberedTo)
 	}
 	h.setActiveLocked(kind, r.id)
 	return r
@@ -267,38 +272,4 @@ func (h *Heap) findHumongousSpanLocked(size int64) (int, int) {
 		}
 	}
 	return -1, 0
-}
-
-func (h *Heap) releaseHumongousLocked(obj *object) {
-	start := int(obj.region)
-	span := obj.span
-	if start < 0 || start+span > len(h.regions) {
-		return
-	}
-	h.alloc.subUsed(obj.size)
-	for i := 0; i < span; i++ {
-		h.freeRegionLocked(h.regions[start+i])
-	}
-}
-
-func (h *Heap) deleteObjectLocked(id ObjectID) {
-	obj, ok := h.objects[id]
-	if !ok {
-		return
-	}
-	if obj.humongous {
-		delete(h.objects, id)
-		h.releaseHumongousLocked(obj)
-		return
-	}
-	if obj.region >= 0 && int(obj.region) < len(h.regions) {
-		r := h.regions[obj.region]
-		delete(r.objects, id)
-		r.used -= obj.size
-		if r.used < 0 {
-			r.used = 0
-		}
-	}
-	h.alloc.subUsed(obj.size)
-	delete(h.objects, id)
 }

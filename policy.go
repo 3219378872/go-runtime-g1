@@ -4,20 +4,18 @@ import "context"
 
 // HeapSize returns the configured managed heap size.
 func (h *Heap) HeapSize() int64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.config.HeapSize
+	var size int64
+	h.withReader(func() { size = h.config.HeapSize })
+	return size
 }
 
 // FreeBytes reports capacity that can currently be used by normal allocation.
 // A humongous span is considered fully occupied until its start object is
 // swept, including unused bytes in its last region.
 func (h *Heap) FreeBytes() int64 {
-	h.world.RLock()
-	defer h.world.RUnlock()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.freeBytesLocked()
+	var free int64
+	h.withReader(func() { free = h.freeBytesLocked() })
+	return free
 }
 
 func (h *Heap) freeBytesLocked() int64 {
@@ -35,24 +33,22 @@ func (h *Heap) freeBytesLocked() int64 {
 // OccupancyPercent returns current managed-object occupancy relative to the
 // configured heap size.
 func (h *Heap) OccupancyPercent() float64 {
-	h.world.RLock()
-	defer h.world.RUnlock()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return float64(h.usedBytesLocked()) * 100 / float64(h.config.HeapSize)
+	var pct float64
+	h.withReader(func() { pct = float64(h.usedBytesLocked()) * 100 / float64(h.config.HeapSize) })
+	return pct
 }
 
 // ShouldStartCycle implements the IHOP policy check used by a periodic GC
 // trigger. Explicit GC calls always start a cycle regardless of this value.
 func (h *Heap) ShouldStartCycle() bool {
-	h.world.RLock()
-	defer h.world.RUnlock()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.closed || h.state != PhaseIdle {
-		return false
-	}
-	return h.usedBytesLocked()*100 >= int64(h.config.InitiatingHeapOccupancy)*h.config.HeapSize
+	var start bool
+	h.withReader(func() {
+		if h.closed || h.state != PhaseIdle {
+			return
+		}
+		start = h.usedBytesLocked()*100 >= int64(h.config.InitiatingHeapOccupancy)*h.config.HeapSize
+	})
+	return start
 }
 
 // MaybeCollect starts a periodic cycle when the configured IHOP threshold is

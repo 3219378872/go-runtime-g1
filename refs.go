@@ -19,7 +19,7 @@ func (h *Heap) AddRoot(id ObjectID) error {
 		return ErrInvalidObject
 	}
 	h.roots[id] = struct{}{}
-	if h.marking {
+	if h.mark.marking {
 		h.markObjectLocked(id)
 	}
 	return nil
@@ -74,15 +74,15 @@ func (h *Heap) SetReference(owner ObjectID, slot int, target ObjectID) error {
 		}
 	}
 	old := obj.refs[slot]
-	if h.marking && old != NullObject {
+	if h.mark.marking && old != NullObject {
 		// SATB records the value that was visible before the mutation.
-		h.satb = append(h.satb, old)
+		h.mark.recordSATB(old)
 	}
 	// Incremental RSet: withdraw the old edge and add the new one, each
 	// O(1) via refcounts. This replaces the old full-region rescan.
 	h.rsRemoveEdgeForSlotLocked(obj, old)
 	obj.refs[slot] = target
-	if h.marking && target != NullObject {
+	if h.mark.marking && target != NullObject {
 		// The insertion barrier prevents a black object from pointing at white.
 		h.markObjectLocked(target)
 	}

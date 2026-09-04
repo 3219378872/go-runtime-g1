@@ -10,6 +10,17 @@ func (h *Heap) phaseLocked(phase Phase) {
 	h.state = phase
 }
 
+// stw runs fn with the world write gate and mu held, so every public mutator
+// waits while STW snapshots change. It replaces the repeated
+// world.Lock/mu.Lock/unlock blocks of the stop-the-world phases.
+func (h *Heap) stw(fn func()) {
+	h.world.Lock()
+	h.mu.Lock()
+	defer h.world.Unlock()
+	defer h.mu.Unlock()
+	fn()
+}
+
 // Collect performs one full G1-style cycle. Mutators are allowed during the
 // concurrent-mark phase and are stopped for the other phases.
 func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
@@ -71,14 +82,13 @@ func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
 
 	// Remark, cleanup, and evacuation are stop-the-world phases. The shared
 	// mutex makes every public mutator wait while these snapshots change.
-	h.world.Lock()
-	h.mu.Lock()
-	h.phaseLocked(PhaseRemark)
-	remarkStart := time.Now()
-	h.finishMarkingLocked()
-	h.collectMarkStatsLocked(&stats)
-	h.mu.Unlock()
-	h.world.Unlock()
+	var remarkStart time.Time
+	h.stw(func() {
+		h.phaseLocked(PhaseRemark)
+		remarkStart = time.Now()
+		h.finishMarkingLocked()
+		h.collectMarkStatsLocked(&stats)
+	})
 	stats.Phases = append(stats.Phases, PhaseRemark)
 	stats.PhaseDurations[PhaseRemark] = time.Since(remarkStart)
 
@@ -87,13 +97,12 @@ func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
 		return stats, fmt.Errorf("%w: %v", ErrContextCancelled, err)
 	}
 
-	h.world.Lock()
-	h.mu.Lock()
-	h.phaseLocked(PhaseCleanup)
-	cleanupStart := time.Now()
-	h.cleanupLocked(&stats)
-	h.mu.Unlock()
-	h.world.Unlock()
+	var cleanupStart time.Time
+	h.stw(func() {
+		h.phaseLocked(PhaseCleanup)
+		cleanupStart = time.Now()
+		h.cleanupLocked(&stats)
+	})
 	stats.Phases = append(stats.Phases, PhaseCleanup)
 	stats.PhaseDurations[PhaseCleanup] = time.Since(cleanupStart)
 
@@ -102,14 +111,14 @@ func (h *Heap) Collect(ctx context.Context, cause Cause) (Stats, error) {
 		return stats, fmt.Errorf("%w: %v", ErrContextCancelled, err)
 	}
 
-	h.world.Lock()
-	h.mu.Lock()
-	h.phaseLocked(PhaseEvacuation)
-	evacuationStart := time.Now()
-	evacuationErr := h.evacuateLocked(&stats)
-	h.finishCycleLocked(&stats)
-	h.mu.Unlock()
-	h.world.Unlock()
+	var evacuationStart time.Time
+	var evacuationErr error
+	h.stw(func() {
+		h.phaseLocked(PhaseEvacuation)
+		evacuationStart = time.Now()
+		evacuationErr = h.evacuateLocked(&stats)
+		h.finishCycleLocked(&stats)
+	})
 	stats.Phases = append(stats.Phases, PhaseEvacuation)
 	stats.PhaseDurations[PhaseEvacuation] = time.Since(evacuationStart)
 
@@ -135,11 +144,7 @@ func (h *Heap) GC() (Stats, error) {
 func (h *Heap) finishCycleLocked(stats *Stats) {
 	// No per-object mark clearing: the epoch is bumped at the next
 	// beginMarkingLocked, invalidating all marks in O(1).
-	h.marking = false
-	h.markCancelled = false
-	h.satb = h.satb[:0]
-	h.markQueue = h.markQueue[:0]
-	h.markActive = 0
+	h.mark.finish()
 	h.state = PhaseIdle
 	for _, r := range h.regions {
 		if r.kind != RegionFree {
@@ -155,18 +160,7 @@ func (h *Heap) abortCycle() {
 	h.mu.Lock()
 	// Invalidate all marks in O(1) by bumping the epoch instead of
 	// clearing every object.
-	h.markEpoch++
-	if h.markEpoch == 0 {
-		for _, obj := range h.objects {
-			obj.markEpoch = 0
-		}
-		h.markEpoch = 1
-	}
-	h.marking = false
-	h.markCancelled = true
-	h.satb = h.satb[:0]
-	h.markQueue = h.markQueue[:0]
-	h.markActive = 0
+	h.mark.abort(h.objects)
 	h.state = PhaseIdle
 	h.markCond.Broadcast()
 	h.mu.Unlock()

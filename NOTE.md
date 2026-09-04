@@ -9,6 +9,14 @@ entry point for format checks, runtime/SSA gates, project tests, race tests,
 and matched official-versus-candidate benchmarks. The benchmark comparator
 is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
 
+## Iteration 2026-09-04d: sim 标记状态机抽取（marker）+ STW 门收敛
+
+动机：`Heap` 直管 7 个标记字段（epoch/队列/SATB/in-flight/取消），worker 编排与状态转移绞合；`Collect` 内 3 段 STW 手写 `world.Lock/mu.Lock` 重复块。延续 allocator/rsetIndex 模式。
+
+改动：新 `marker.go`（`marker` 状态机：`begin/abort/finish` epoch 管理、`mark/isMarked` 单对象 test-and-set、`push` 空转非空跳变报告、`popBatch` 有界 LIFO、`recordSATB`；不加锁、不碰图，同步与寻址留 `Heap` 编排层）；`mark.go` worker/barrier/drain 经 `h.mark` 委托，锁/cond 结构逐行等价（含单次 Signal、完成 Broadcast、取消路径）；删除零调用 `isMarkedLocked`（由 `marker#isMarked` 替代，`sweep.go` 两处改用）；`cycle.go` 新增 `stw` 门并收敛 remark/cleanup/evacuation 三段（initial-mark 保留显式锁，因其含 early-return），`abortCycle/finishCycleLocked` 委托 `mark.abort/finish`。
+
+门：`go test .`、`go test -race .` 通过（含 7 个新 `marker` 单测，共 21 用例）；`./bench/check-trace.sh` 零 WARN（同步 `doc.go`、`M01` marker 行 + 周期编排行、`E03` 21 用例、`justfile:project_go_files` 追新文件）；sim 交替 bench（条件同 09-04c，main/task 各 7 次）`ns/op|B/op|allocs/op` 中位数 task/main 18 行全 `<=1.05`（最差 `BenchmarkEvacHeavy ns/op 1.021`），一次通过无需复裁。
+
 ## Iteration 2026-09-04c: sim 内部边界（allocator/rsetIndex 抽取+测试拆分）
 
 动机：`Heap` 神对象直管 5 个分配记账字段 + `rsRef` 原始 map，RSet 计数逻辑只能经 `Heap` 间接测试；`g1gc_test.go`（521 行）十个用例跨 5 个领域。继续 09-04b 的模块化方向。

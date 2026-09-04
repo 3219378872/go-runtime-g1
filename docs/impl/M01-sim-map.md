@@ -19,8 +19,9 @@ ID: M01。覆盖 D01（部分）、S01/S03。证据：E01#test-project, E03#unit
 | 分配池 | `pool.go` | 空闲池/active 缓存/used 记账（可单测） | `freePool#push/pop/claim, activeCache, allocator` |
 | 引用 | `refs.go` | Roots/引用/存活/Pin | `AddRoot, SetReference, Resolve, ObjectInfo, Pin/Unpin` |
 | 记忆集 | `rset.go` | 跨区引用计数索引 | `rsKey, rsAddEdgeForSlotLocked, rebuildRememberedSetsLocked` |
-| 周期编排 | `cycle.go` | `Collect` 五阶段编排/收尾/中断 | `Collect, GC, finishCycleLocked, abortCycle` |
-| 并发标记 | `mark.go` | SATB/队列/worker/起止 | `beginMarkingLocked, runConcurrentMark, finishMarkingLocked` |
+| 周期编排 | `cycle.go` | `Collect` 五阶段编排/STW 门/收尾/中断 | `Collect, GC, stw, finishCycleLocked, abortCycle` |
+| 标记状态机 | `marker.go` | epoch/队列/SATB/取消（可单测，不加锁） | `marker#begin/abort/finish/mark/push/popBatch` |
+| 并发标记 | `mark.go` | worker 编排/同步/barrier（持锁经过 `h.mark`） | `beginMarkingLocked, runConcurrentMark, markObjectLocked, finishMarkingLocked` |
 | 清扫 | `sweep.go` | 不可达回收/区域释放 | `cleanupLocked` |
 | 集合选择 | `cset.go` | CSet/暂停预估 | `selectCollectionSetLocked, pauseEstimate` |
 | 疏散 | `evac.go` | 拷贝/转发/引用重写 | `allocateEvacuationCopyLocked, evacuateLocked, rewriteForwardedRefsLocked` |
@@ -35,7 +36,7 @@ ID: M01。覆盖 D01（部分）、S01/S03。证据：E01#test-project, E03#unit
 `region#objectIDs/reset` 旧版（统一为原地复用的 `reset`），
 `objectIDsUnsorted` 更名为 `memberIDs`。行为零改动，见符号覆盖审计。
 
-证据：E01 `test-project`，E03 14 用例（`cycle/evac/rset/mark/policy/pool` 六个测试文件，见 E03）。
+证据：E01 `test-project`，E03 21 用例（`cycle/evac/rset/mark/marker/policy/pool` 七个测试文件，见 E03）。
 
 ## 迁移来源
 

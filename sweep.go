@@ -8,7 +8,7 @@ func (h *Heap) cleanupLocked(stats *Stats) {
 		case RegionHumongousStart:
 			for id := range r.objects {
 				obj, ok := h.objects[id]
-				if !ok || obj.markEpoch != h.markEpoch {
+				if !ok || !h.mark.isMarked(obj) {
 					if ok {
 						stats.ReclaimedBytes += obj.size
 						delete(h.objects, id)
@@ -31,7 +31,7 @@ func (h *Heap) cleanupLocked(stats *Stats) {
 				if !ok {
 					continue
 				}
-				if obj.markEpoch != h.markEpoch {
+				if !h.mark.isMarked(obj) {
 					stats.ReclaimedBytes += obj.size
 					delete(h.objects, id)
 					delete(r.objects, id)

@@ -30,14 +30,10 @@ type Heap struct {
 	cycle   uint64
 	state   Phase
 
-	// Marking state: see mark.go.
-	marking       bool
-	satb          []ObjectID
-	markQueue     []ObjectID
-	markActive    int
-	markCond      *sync.Cond
-	markCancelled bool
-	markEpoch     uint32
+	// Marking state machine: see marker.go. markCond stays here because it
+	// is bound to mu; the marker itself never locks.
+	mark     marker
+	markCond *sync.Cond
 
 	// Allocation fast path: see alloc.go and pool.go.
 	alloc allocator

@@ -7,20 +7,7 @@ import (
 )
 
 func (h *Heap) beginMarkingLocked() {
-	h.markEpoch++
-	if h.markEpoch == 0 {
-		// Epoch wrapped (once per 4B cycles): clear all to avoid collision.
-		for _, obj := range h.objects {
-			obj.markEpoch = 0
-		}
-		h.markEpoch = 1
-	}
-	h.marking = true
-	h.markCancelled = false
-	// Reuse queue/satb backing arrays to avoid per-cycle allocations.
-	h.satb = h.satb[:0]
-	h.markQueue = h.markQueue[:0]
-	h.markActive = 0
+	h.mark.begin(h.objects)
 	canonicalRoots := make(map[ObjectID]struct{}, len(h.roots))
 	for root := range h.roots {
 		root = h.resolveLocked(root)
@@ -33,11 +20,6 @@ func (h *Heap) beginMarkingLocked() {
 	h.roots = canonicalRoots
 }
 
-// isMarkedLocked reports whether obj is marked in the current epoch.
-func (h *Heap) isMarkedLocked(obj *object) bool {
-	return obj.markEpoch == h.markEpoch
-}
-
 // markObjectLocked is the shared mark primitive used by root scanning, the
 // concurrent workers, the SATB drain, and insertion/allocation barriers.
 // It signals (not broadcasts) only on empty→non-empty transitions to avoid
@@ -48,13 +30,10 @@ func (h *Heap) markObjectLocked(id ObjectID) {
 	}
 	id = h.resolveLocked(id)
 	obj, ok := h.objects[id]
-	if !ok || obj.markEpoch == h.markEpoch {
+	if !ok || !h.mark.mark(obj) {
 		return
 	}
-	obj.markEpoch = h.markEpoch
-	wasEmpty := len(h.markQueue) == 0
-	h.markQueue = append(h.markQueue, id)
-	if wasEmpty {
+	if h.mark.push(id) {
 		h.markCond.Signal()
 	}
 }
@@ -81,7 +60,7 @@ func (h *Heap) runConcurrentMark(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			h.mu.Lock()
-			h.markCancelled = true
+			h.mark.cancelled = true
 			h.markCond.Broadcast()
 			h.mu.Unlock()
 		case <-watchDone:
@@ -92,7 +71,7 @@ func (h *Heap) runConcurrentMark(ctx context.Context) error {
 	watcher.Wait()
 
 	h.mu.Lock()
-	cancelled := h.markCancelled
+	cancelled := h.mark.cancelled
 	h.mu.Unlock()
 	if cancelled || ctx.Err() != nil {
 		if err := ctx.Err(); err != nil {
@@ -109,27 +88,27 @@ func (h *Heap) markWorker(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
 			h.mu.Lock()
-			h.markCancelled = true
+			h.mark.cancelled = true
 			h.markCond.Broadcast()
 			h.mu.Unlock()
 			return
 		}
 
 		h.mu.Lock()
-		for len(h.markQueue) == 0 && h.markActive > 0 && !h.markCancelled {
+		for len(h.mark.queue) == 0 && h.mark.active > 0 && !h.mark.cancelled {
 			h.markCond.Wait()
 			if ctx.Err() != nil {
-				h.markCancelled = true
+				h.mark.cancelled = true
 				h.markCond.Broadcast()
 			}
 		}
-		if h.markCancelled || ctx.Err() != nil {
-			h.markCancelled = true
+		if h.mark.cancelled || ctx.Err() != nil {
+			h.mark.cancelled = true
 			h.markCond.Broadcast()
 			h.mu.Unlock()
 			return
 		}
-		if len(h.markQueue) == 0 {
+		if len(h.mark.queue) == 0 {
 			// No queued work and no active scanner means the mark closure is
 			// complete at this point. A later mutator update is handled by SATB
 			// during remark.
@@ -138,18 +117,8 @@ func (h *Heap) markWorker(ctx context.Context) {
 		}
 		// Pop a batch under a single critical section and snapshot refs
 		// inline (one lock instead of pop + snapshotRefs's extra lock).
-		n := len(h.markQueue)
-		if n > cap(batch) {
-			n = cap(batch)
-		}
-		batch = batch[:0]
-		for i := 0; i < n; i++ {
-			last := len(h.markQueue) - 1
-			id := h.markQueue[last]
-			h.markQueue = h.markQueue[:last]
-			batch = append(batch, id)
-		}
-		h.markActive++
+		batch = h.mark.popBatch(batch)
+		h.mark.active++
 		// Snapshot refs while still holding the lock. Batch is bounded
 		// (<=32 objects) so the critical section stays short.
 		var refs []ObjectID
@@ -161,24 +130,23 @@ func (h *Heap) markWorker(ctx context.Context) {
 		h.mu.Unlock()
 
 		h.mu.Lock()
-		if !h.markCancelled {
-			wasEmpty := len(h.markQueue) == 0
+		if !h.mark.cancelled {
+			wasEmpty := len(h.mark.queue) == 0
 			for _, ref := range refs {
 				if ref == NullObject {
 					continue
 				}
 				rid := h.resolveLocked(ref)
-				if obj, ok := h.objects[rid]; ok && obj.markEpoch != h.markEpoch {
-					obj.markEpoch = h.markEpoch
-					h.markQueue = append(h.markQueue, rid)
+				if obj, ok := h.objects[rid]; ok && h.mark.mark(obj) {
+					h.mark.queue = append(h.mark.queue, rid)
 				}
 			}
-			if wasEmpty && len(h.markQueue) > 0 {
+			if wasEmpty && len(h.mark.queue) > 0 {
 				h.markCond.Signal()
 			}
 		}
-		h.markActive--
-		if len(h.markQueue) == 0 && h.markActive == 0 {
+		h.mark.active--
+		if len(h.mark.queue) == 0 && h.mark.active == 0 {
 			h.markCond.Broadcast()
 		}
 		h.mu.Unlock()
@@ -186,19 +154,19 @@ func (h *Heap) markWorker(ctx context.Context) {
 }
 
 func (h *Heap) drainMarkQueueLocked() {
-	for len(h.satb) > 0 || len(h.markQueue) > 0 {
-		for len(h.satb) > 0 {
-			last := len(h.satb) - 1
-			id := h.satb[last]
-			h.satb = h.satb[:last]
+	for len(h.mark.satb) > 0 || len(h.mark.queue) > 0 {
+		for len(h.mark.satb) > 0 {
+			last := len(h.mark.satb) - 1
+			id := h.mark.satb[last]
+			h.mark.satb = h.mark.satb[:last]
 			h.markObjectLocked(id)
 		}
-		if len(h.markQueue) == 0 {
+		if len(h.mark.queue) == 0 {
 			continue
 		}
-		last := len(h.markQueue) - 1
-		id := h.markQueue[last]
-		h.markQueue = h.markQueue[:last]
+		last := len(h.mark.queue) - 1
+		id := h.mark.queue[last]
+		h.mark.queue = h.mark.queue[:last]
 		obj, ok := h.objects[h.resolveLocked(id)]
 		if !ok {
 			continue
@@ -211,14 +179,11 @@ func (h *Heap) drainMarkQueueLocked() {
 
 func (h *Heap) finishMarkingLocked() {
 	h.drainMarkQueueLocked()
-	h.marking = false
-	h.satb = h.satb[:0]
-	h.markQueue = h.markQueue[:0]
-	h.markActive = 0
+	h.mark.finish()
 }
 
 func (h *Heap) collectMarkStatsLocked(stats *Stats) {
-	epoch := h.markEpoch
+	epoch := h.mark.epoch
 	for _, obj := range h.objects {
 		if obj.markEpoch == epoch {
 			stats.MarkedObjects++

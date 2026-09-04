@@ -171,7 +171,7 @@ func (h *Heap) allocateLocked(size int64, refs []ObjectID) (ObjectID, error) {
 }
 
 func (h *Heap) applyAllocationBarrierLocked(obj *object) {
-	if !h.marking {
+	if !h.mark.marking {
 		return
 	}
 	// A newly allocated object is treated as black. The insertion barrier also

@@ -4,7 +4,7 @@ ID: S03。上游：I01, I03。下游：D04, D05。实现：M01#collect-select, M
 
 ## Given/When/Then
 
-- Given 疏散窗口，When 选择 CSet，Then 待拷贝字节有界（fork copy budget 256 KiB，`NOTE.md:458`；模拟包 `pauseEstimate` 见 `collect.go`）。
+- Given 疏散窗口，When 选择 CSet，Then 待拷贝字节有界（fork copy budget 256 KiB，`NOTE.md:458`；模拟包 `pauseEstimate` 见 `cset.go#pauseEstimate`）。
 - Given owner-span 投影集超 512 spans 或 live 对象超 16384，When 评估窗口，Then 整体 defer（`NOTE.md:644-650`）。
 - Given inbound 索引溢出，When 疏散前检查，Then 整体 defer，不做无界全堆重写（`NOTE.md:645-646`）。
 - Given 窗口分配区（window-alloc regions），When STW 重写，Then 纳入覆盖；list 溢出时降级为保守 defer（`NOTE.md:399-408`）。

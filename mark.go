@@ -226,26 +226,3 @@ func (h *Heap) collectMarkStatsLocked(stats *Stats) {
 		}
 	}
 }
-
-func (h *Heap) abortCycle() {
-	h.world.Lock()
-	h.mu.Lock()
-	// Invalidate all marks in O(1) by bumping the epoch instead of
-	// clearing every object.
-	h.markEpoch++
-	if h.markEpoch == 0 {
-		for _, obj := range h.objects {
-			obj.markEpoch = 0
-		}
-		h.markEpoch = 1
-	}
-	h.marking = false
-	h.markCancelled = true
-	h.satb = h.satb[:0]
-	h.markQueue = h.markQueue[:0]
-	h.markActive = 0
-	h.state = PhaseIdle
-	h.markCond.Broadcast()
-	h.mu.Unlock()
-	h.world.Unlock()
-}

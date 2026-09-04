@@ -9,6 +9,18 @@ entry point for format checks, runtime/SSA gates, project tests, race tests,
 and matched official-versus-candidate benchmarks. The benchmark comparator
 is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
 
+## Iteration 2026-09-04b: sim 模块化重构（7 文件 → 19 文件，纯搬运）
+
+动机：根模拟包 `types.go`（727 行）/`heap.go`（693 行）是 god 文件（身份+配置+堆状态+周期编排混装；分配+Roots/引用+RSet+快照混装），6 个无调用者兼容别名与 3 处死代码增加耦合。接 NOTE 2026-09-04 fork 拆分思路，把 sim 侧也按单一职责拆分，为后续 D05 纵深留干净插入点。只搬代码不改行为。
+
+新布局（同包 `g1gc`，公开 API 仅删无用别名）：`doc.go`（包地图+锁纪律）、`id.go`（句柄/阶段/起因）、`errors.go`（哨兵错误）、`config.go`（配置）、`object.go`（对象模型+`cloneIDs`）、`region.go`（区域模型+`RegionInfo`）、`stats.go`（统计+深拷贝）、`heap.go`（状态组合/New/Close/寻址）、`alloc.go`（分配/空闲栈/active/记账）、`refs.go`（Roots/引用/Pin）、`rset.go`（记忆集）、`cycle.go`（`Collect/GC/finishCycle/abortCycle`）、`mark.go`（并发标记）、`sweep.go`（`cleanupLocked`）、`cset.go`（CSet 选择）、`evac.go`（疏散）、`snapshot.go`（只读查询）；`policy.go`/`validate.go` 不动。
+
+删除（`rg` 确认零调用者）：别名 `Alloc/AllocObject/AllocWithRefs/SetRef/GetReference/NewHeap`；死代码 `recordRememberedLocked/rebuildOneRegionLocked`、`region#objectIDs`、`region#reset` 旧版（统一为原地复用版）；`objectIDsUnsorted` 更名 `memberIDs`。`Heap` 字段按 graph/mark/alloc 分组注释。
+
+符号审计：新旧顶层符号差集恰为上述 11 项删除+1 更名+`policy.go`/`validate.go`（审计基线未含），无行为符号丢失。
+
+门：`go test .`、`go test -race .` 通过；`./bench/check-trace.sh` 零 WARN（同步更新 `M01` 新表、`S01/S02/S03` 锚点为 `文件#func`、`I02` 文件清单、`justfile:project_go_files`）；sim 交替 bench（同 Go1.26.6、同核 `taskset 0,2`、`GOMAXPROCS=2`、main/task 各 7 次）`ns/op|B/op|allocs/op` 中位数 task/main 全 `<=1.05`（最差 `BenchmarkEvacHeavy ns/op 1.031`，`B/op/allocs/op` 多数恒等）。
+
 ## Iteration 2026-09-04: fork 纯搬运拆分（2 文件 → 9 文件）
 
 动机：`g1gc.go`（1256 行）/`g1gc_evacuate.go`（1181 行）职责交织，D05 后续（grow-time 取页、sweep 侧路由）无干净插入点。只搬代码不改逻辑。

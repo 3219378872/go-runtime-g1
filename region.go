@@ -1,7 +1,5 @@
 package g1gc
 
-import "sort"
-
 // RegionKind identifies the role of a heap region in the current collection
 // cycle.
 type RegionKind uint8
@@ -46,28 +44,9 @@ type region struct {
 	lastLiveBytes  int64
 }
 
-func (r *region) objectIDs() []ObjectID {
-	ids := make([]ObjectID, 0, len(r.objects))
-	for id := range r.objects {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	return ids
-}
-
+// reset returns a region to the free state, clearing maps in place so
+// STW paths do not churn the Go GC with tiny map allocations.
 func (r *region) reset() {
-	r.kind = RegionFree
-	r.used = 0
-	r.objects = make(map[ObjectID]struct{})
-	r.rememberedFrom = make(map[RegionID]struct{})
-	r.rememberedTo = make(map[RegionID]struct{})
-	r.span = 0
-	r.lastLiveBytes = 0
-}
-
-// resetReuse is the allocation-free variant of reset: it clears maps in
-// place so STW paths do not churn the Go GC with tiny map allocations.
-func (r *region) resetReuse() {
 	r.kind = RegionFree
 	r.used = 0
 	if r.objects == nil {
@@ -95,12 +74,25 @@ func (r *region) resetReuse() {
 	r.lastLiveBytes = 0
 }
 
-// objectIDsUnsorted appends member IDs without sorting. Use this on hot
-// paths; sort only at API/test boundaries that require determinism.
-func (r *region) objectIDsUnsorted() []ObjectID {
+// memberIDs returns member IDs without sorting. Use this on hot paths;
+// sort only at API/test boundaries that require determinism.
+func (r *region) memberIDs() []ObjectID {
 	ids := make([]ObjectID, 0, len(r.objects))
 	for id := range r.objects {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// RegionInfo is a read-only region snapshot. RememberedFrom lists source
+// regions that currently contain references into this region.
+type RegionInfo struct {
+	ID             RegionID
+	Kind           RegionKind
+	Capacity       int64
+	Used           int64
+	LiveBytes      int64
+	ObjectCount    int
+	RememberedFrom []RegionID
+	Span           int
 }

@@ -6,7 +6,7 @@ ID: S02。上游：I01, I03。下游：D02, D03。实现：M02#evacuate-rewrite�
 
 - Given frag 负载 + `g1evac=1` 生产配置，When 跑 stress（`bench/stress.sh`），Then 零 `rewrite missed`、零 `accounting drifted`、零 `bad pointer` throw。
 - Given `g1evac>=4` 诊断模式，When 每疏散窗口跑 `g1gcVerifyFullRewrite` + used-region recount，Then miss 计入诊断，`g1evac>=5` 输出逐 slot dump（含 `listed/abit/mbit/imc/tdbit`）。
-- Given 疏散失败（pinned/预算/overflow），When `evacuateLocked` 返回 `ErrEvacuationFailure`，Then 失败 Region 保留 live 对象，周期仍 complete（`types.go:549-553`）。
+- Given 疏散失败（pinned/预算/overflow），When `evacuateLocked` 返回 `ErrEvacuationFailure`，Then 失败 Region 保留 live 对象，周期仍 complete（`evac.go#evacuateLocked`）。
 
 ## 历史门（由 NOTE 迁移）
 

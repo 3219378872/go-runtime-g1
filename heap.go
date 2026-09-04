@@ -109,14 +109,19 @@ func (h *Heap) allocateLocked(size int64, refs []ObjectID) (ObjectID, error) {
 		h.objects[id] = obj
 		r.objects[id] = struct{}{}
 		r.used += size
+		h.usedTotal += size
 		h.applyAllocationBarrierLocked(obj)
-		h.recordRememberedLocked(obj)
+		h.recordAllocRememberedLocked(obj)
 		return id, nil
 	}
 
 	start, span := h.findHumongousSpanLocked(size)
 	if start < 0 {
 		return NullObject, ErrOutOfMemory
+	}
+	for i := 0; i < span; i++ {
+		h.claimFreeAtLocked(start + i)
+		h.clearActiveLocked(RegionID(start + i))
 	}
 	obj := &object{
 		id:        id,
@@ -137,8 +142,9 @@ func (h *Heap) allocateLocked(size int64, refs []ObjectID) (ObjectID, error) {
 		r.used = r.capacity
 		r.span = 0
 	}
+	h.usedTotal += size
 	h.applyAllocationBarrierLocked(obj)
-	h.recordRememberedLocked(obj)
+	h.recordAllocRememberedLocked(obj)
 	return id, nil
 }
 
@@ -157,38 +163,85 @@ func (h *Heap) applyAllocationBarrierLocked(obj *object) {
 }
 
 func (h *Heap) findNormalRegionLocked(size int64, kind RegionKind, excluded map[RegionID]bool) *region {
+	// Fast path: cached active region for this kind.
+	if r := h.takeActiveLocked(kind, size, excluded); r != nil {
+		return r
+	}
+	// Slow path: scan only regions of the requested kind (active missed
+	// because it is full, excluded, or unset). This is rare; the common
+	// case never reaches here.
 	for _, r := range h.regions {
-		if r.kind == kind && !excluded[r.id] && r.capacity-r.used >= size {
+		if r.kind == kind && r.capacity-r.used >= size {
+			if excluded != nil && excluded[r.id] {
+				continue
+			}
+			h.setActiveLocked(kind, r.id)
 			return r
 		}
 	}
-	for _, r := range h.regions {
-		if r.kind == RegionFree && !excluded[r.id] && r.capacity >= size {
-			r.kind = kind
-			r.used = 0
-			r.objects = make(map[ObjectID]struct{})
-			r.rememberedFrom = make(map[RegionID]struct{})
-			r.rememberedTo = make(map[RegionID]struct{})
-			return r
+	// No room: pop a free region in O(1) and convert it. Reuse maps to
+	// avoid STW-time allocations.
+	r := h.popFreeLocked(excluded)
+	if r == nil || r.capacity < size {
+		if r != nil {
+			// Too small: return it and fail. Region sizes are uniform
+			// except possibly the last one, so this is extremely rare.
+			h.pushFreeLocked(r)
+		}
+		return nil
+	}
+	r.kind = kind
+	r.used = 0
+	if r.objects == nil {
+		r.objects = make(map[ObjectID]struct{})
+	} else {
+		for id := range r.objects {
+			delete(r.objects, id)
 		}
 	}
-	return nil
+	if r.rememberedFrom == nil {
+		r.rememberedFrom = make(map[RegionID]struct{})
+	} else {
+		for id := range r.rememberedFrom {
+			delete(r.rememberedFrom, id)
+		}
+	}
+	if r.rememberedTo == nil {
+		r.rememberedTo = make(map[RegionID]struct{})
+	} else {
+		for id := range r.rememberedTo {
+			delete(r.rememberedTo, id)
+		}
+	}
+	h.setActiveLocked(kind, r.id)
+	return r
+}
+
+// freeRegionLocked resets r and returns it to the free stack, reusing maps.
+func (h *Heap) freeRegionLocked(r *region) {
+	r.resetReuse()
+	h.pushFreeLocked(r)
 }
 
 func (h *Heap) findHumongousSpanLocked(size int64) (int, int) {
-	for start := 0; start < len(h.regions); start++ {
-		if h.regions[start].kind != RegionFree {
+	// Single O(R) pass tracking the current free run instead of the old
+	// O(R^2) nested scan. Respects inFree so it stays consistent with
+	// the free stack.
+	runStart := -1
+	var runCap int64
+	for i, r := range h.regions {
+		if r.kind != RegionFree {
+			runStart = -1
+			runCap = 0
 			continue
 		}
-		var capacity int64
-		for end := start; end < len(h.regions); end++ {
-			if h.regions[end].kind != RegionFree {
-				break
-			}
-			capacity += h.regions[end].capacity
-			if capacity >= size {
-				return start, end - start + 1
-			}
+		if runStart < 0 {
+			runStart = i
+			runCap = 0
+		}
+		runCap += r.capacity
+		if runCap >= size {
+			return runStart, i - runStart + 1
 		}
 	}
 	return -1, 0
@@ -200,8 +253,9 @@ func (h *Heap) releaseHumongousLocked(obj *object) {
 	if start < 0 || start+span > len(h.regions) {
 		return
 	}
+	h.usedTotal -= obj.size
 	for i := 0; i < span; i++ {
-		h.regions[start+i].reset()
+		h.freeRegionLocked(h.regions[start+i])
 	}
 }
 
@@ -223,6 +277,7 @@ func (h *Heap) deleteObjectLocked(id ObjectID) {
 			r.used = 0
 		}
 	}
+	h.usedTotal -= obj.size
 	delete(h.objects, id)
 }
 
@@ -302,12 +357,15 @@ func (h *Heap) SetReference(owner ObjectID, slot int, target ObjectID) error {
 		// SATB records the value that was visible before the mutation.
 		h.satb = append(h.satb, old)
 	}
+	// Incremental RSet: withdraw the old edge and add the new one, each
+	// O(1) via refcounts. This replaces the old full-region rescan.
+	h.rsRemoveEdgeForSlotLocked(obj, old)
 	obj.refs[slot] = target
 	if h.marking && target != NullObject {
 		// The insertion barrier prevents a black object from pointing at white.
 		h.markObjectLocked(target)
 	}
-	h.recordRememberedLocked(obj)
+	h.rsAddEdgeForSlotLocked(obj, target)
 	return nil
 }
 
@@ -432,52 +490,133 @@ func (h *Heap) Unpin(id ObjectID) error {
 	return nil
 }
 
+// recordRememberedLocked is kept for compatibility; mutator paths now use
+// the O(1) incremental edge helpers below. It recomputes one source region
+// and is only used as a fallback.
 func (h *Heap) recordRememberedLocked(source *object) {
-	// A source object may have several cross-region slots. Recomputing the
-	// source's entries keeps a write to one slot from erasing another slot's
-	// remembered-set edge.
 	if source.region < 0 || int(source.region) >= len(h.regions) {
 		return
 	}
-	sourceRegion := h.regions[source.region]
-	for target := range sourceRegion.rememberedTo {
-		delete(h.regions[target].rememberedFrom, source.region)
+	h.rebuildOneRegionLocked(source.region)
+}
+
+func (h *Heap) rebuildOneRegionLocked(src RegionID) {
+	if src < 0 || int(src) >= len(h.regions) {
+		return
 	}
-	sourceRegion.rememberedTo = make(map[RegionID]struct{})
+	sourceRegion := h.regions[src]
+	for target := range sourceRegion.rememberedTo {
+		delete(h.regions[target].rememberedFrom, src)
+	}
+	for k, n := range h.rsRef {
+		if RegionID(uint32(k>>32)) == src {
+			_ = n
+			// counts for src are rebuilt below; drop stale keys first
+			delete(h.rsRef, k)
+		}
+	}
+	if sourceRegion.rememberedTo == nil {
+		sourceRegion.rememberedTo = make(map[RegionID]struct{})
+	} else {
+		for t := range sourceRegion.rememberedTo {
+			delete(sourceRegion.rememberedTo, t)
+		}
+	}
 	for id := range sourceRegion.objects {
 		obj, ok := h.objects[id]
 		if !ok {
 			continue
 		}
 		for _, ref := range obj.refs {
-			if ref == NullObject {
-				continue
-			}
-			targetObj, ok := h.objects[h.resolveLocked(ref)]
-			if ok && targetObj.region != source.region {
-				h.regions[targetObj.region].rememberedFrom[source.region] = struct{}{}
-				sourceRegion.rememberedTo[targetObj.region] = struct{}{}
-			}
+			h.rsAddEdgeForSlotLocked(obj, ref)
 		}
+	}
+}
+
+// rsAddEdgeForSlotLocked adds one slot's cross-region edge in O(1).
+func (h *Heap) rsAddEdgeForSlotLocked(source *object, ref ObjectID) {
+	if ref == NullObject || source == nil {
+		return
+	}
+	if source.region < 0 || int(source.region) >= len(h.regions) {
+		return
+	}
+	target, ok := h.objects[h.resolveLocked(ref)]
+	if !ok || target.region == source.region {
+		return
+	}
+	if target.region < 0 || int(target.region) >= len(h.regions) {
+		return
+	}
+	k := rsKey(source.region, target.region)
+	if h.rsRef[k] == 0 {
+		h.regions[target.region].rememberedFrom[source.region] = struct{}{}
+		h.regions[source.region].rememberedTo[target.region] = struct{}{}
+	}
+	h.rsRef[k]++
+}
+
+// rsRemoveEdgeForSlotLocked withdraws one slot's edge in O(1).
+func (h *Heap) rsRemoveEdgeForSlotLocked(source *object, ref ObjectID) {
+	if ref == NullObject || source == nil {
+		return
+	}
+	if source.region < 0 || int(source.region) >= len(h.regions) {
+		return
+	}
+	target, ok := h.objects[h.resolveLocked(ref)]
+	if !ok || target.region == source.region {
+		return
+	}
+	k := rsKey(source.region, target.region)
+	n, ok := h.rsRef[k]
+	if !ok || n <= 0 {
+		return
+	}
+	if n == 1 {
+		delete(h.rsRef, k)
+		if int(target.region) < len(h.regions) && target.region >= 0 {
+			delete(h.regions[target.region].rememberedFrom, source.region)
+			// Only drop the forward edge when no other dst from src remains.
+			// Since counts are per-pair, zero here means the pair is gone.
+			delete(h.regions[source.region].rememberedTo, target.region)
+		}
+		return
+	}
+	h.rsRef[k] = n - 1
+}
+
+// recordAllocRememberedLocked indexes all refs of a freshly allocated object.
+// Cost is O(slots), not O(region size).
+func (h *Heap) recordAllocRememberedLocked(obj *object) {
+	for _, ref := range obj.refs {
+		h.rsAddEdgeForSlotLocked(obj, ref)
 	}
 }
 
 func (h *Heap) rebuildRememberedSetsLocked() {
 	for _, r := range h.regions {
-		r.rememberedFrom = make(map[RegionID]struct{})
-		r.rememberedTo = make(map[RegionID]struct{})
+		if r.rememberedFrom == nil {
+			r.rememberedFrom = make(map[RegionID]struct{})
+		} else {
+			for s := range r.rememberedFrom {
+				delete(r.rememberedFrom, s)
+			}
+		}
+		if r.rememberedTo == nil {
+			r.rememberedTo = make(map[RegionID]struct{})
+		} else {
+			for t := range r.rememberedTo {
+				delete(r.rememberedTo, t)
+			}
+		}
+	}
+	for k := range h.rsRef {
+		delete(h.rsRef, k)
 	}
 	for _, obj := range h.objects {
 		for _, ref := range obj.refs {
-			if ref == NullObject {
-				continue
-			}
-			target, ok := h.objects[h.resolveLocked(ref)]
-			if !ok || target.region == obj.region {
-				continue
-			}
-			h.regions[target.region].rememberedFrom[obj.region] = struct{}{}
-			h.regions[obj.region].rememberedTo[target.region] = struct{}{}
+			h.rsAddEdgeForSlotLocked(obj, ref)
 		}
 	}
 }
@@ -495,11 +634,13 @@ func (h *Heap) RegionSnapshot() []RegionInfo {
 			remembered = append(remembered, source)
 		}
 		sort.Slice(remembered, func(i, j int) bool { return remembered[i] < remembered[j] })
-		live := int64(0)
-		for id := range r.objects {
-			if obj, ok := h.objects[id]; ok {
-				live += obj.size
-			}
+		// r.used is maintained incrementally and equals the sum of member
+		// object sizes; the old per-object summation loop was O(N).
+		// Humongous continuations carry reserve accounting in used but own
+		// no objects, so their live bytes stay 0 as before.
+		live := r.used
+		if r.kind == RegionHumongousContinue {
+			live = 0
 		}
 		out = append(out, RegionInfo{
 			ID:             r.id,

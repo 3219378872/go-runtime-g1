@@ -22,41 +22,47 @@ func (h *Heap) cleanupLocked(stats *Stats) {
 		case RegionHumongousStart:
 			for id := range r.objects {
 				obj, ok := h.objects[id]
-				if !ok || !obj.marked {
+				if !ok || obj.markEpoch != h.markEpoch {
 					if ok {
 						stats.ReclaimedBytes += obj.size
 						delete(h.objects, id)
+						h.usedTotal -= obj.size
 					}
 					stats.FreedRegions += r.span
-					r.reset()
+					span := r.span
+					start := int(r.id)
+					for i := 0; i < span && start+i < len(h.regions); i++ {
+						h.freeRegionLocked(h.regions[start+i])
+					}
 					break
 				}
 				r.lastLiveBytes = obj.size
 			}
 		default:
 			live := int64(0)
-			for _, id := range r.objectIDs() {
+			for _, id := range r.objectIDsUnsorted() {
 				obj, ok := h.objects[id]
 				if !ok {
 					continue
 				}
-				if !obj.marked {
+				if obj.markEpoch != h.markEpoch {
 					stats.ReclaimedBytes += obj.size
 					delete(h.objects, id)
 					delete(r.objects, id)
 					r.used -= obj.size
+					h.usedTotal -= obj.size
 					continue
 				}
 				live += obj.size
 			}
 			r.lastLiveBytes = live
 			if r.used == 0 {
-				r.reset()
+				h.freeRegionLocked(r)
 				stats.FreedRegions++
 			}
 		}
 	}
-	h.rebuildRememberedSetsLocked()
+	// RSet rebuild deferred to finishCycleLocked (single rebuild per cycle).
 }
 
 func (h *Heap) selectCollectionSetLocked(stats *Stats) map[RegionID]bool {
@@ -83,7 +89,8 @@ func (h *Heap) selectCollectionSetLocked(stats *Stats) map[RegionID]bool {
 			young = append(young, candidate)
 		}
 	}
-	sort.Slice(young, func(i, j int) bool { return young[i].id < young[j].id })
+	// young is already in region-id order because h.regions is ordered;
+	// the old explicit sort was pure overhead.
 	sort.Slice(old, func(i, j int) bool {
 		if old[i].garbage == old[j].garbage {
 			return old[i].id < old[j].id
@@ -134,23 +141,26 @@ func (h *Heap) pauseEstimate(live int64, objects int) time.Duration {
 }
 
 func (h *Heap) allocateEvacuationCopyLocked(src *object, targetKind RegionKind, excluded map[RegionID]bool) (*object, bool) {
-	hasExistingToSpace := false
-	for _, r := range h.regions {
-		if r.kind == targetKind && !excluded[r.id] && r.capacity-r.used >= src.size {
-			hasExistingToSpace = true
-			break
-		}
-	}
-	if !hasExistingToSpace {
-		free := int64(0)
+	// Fast path O(1): active region has room → no reserve check needed.
+	// Slow path (active miss, rare): scan same-kind for slack; only when
+	// no same-kind room exists do we consult the O(1) freeCap reserve.
+	// cset never contains free regions, so freeCap needs no exclusion.
+	if h.takeActiveLocked(targetKind, src.size, excluded) == nil {
+		hasRoom := false
 		for _, r := range h.regions {
-			if r.kind == RegionFree && !excluded[r.id] {
-				free += r.capacity
+			if r.kind == targetKind && r.capacity-r.used >= src.size {
+				if excluded != nil && excluded[r.id] {
+					continue
+				}
+				hasRoom = true
+				break
 			}
 		}
-		reserve := h.config.HeapSize * int64(h.config.EvacuationReservePercent) / 100
-		if free-reserve < src.size {
-			return nil, false
+		if !hasRoom {
+			reserve := h.config.HeapSize * int64(h.config.EvacuationReservePercent) / 100
+			if h.freeCap-reserve < src.size {
+				return nil, false
+			}
 		}
 	}
 	r := h.findNormalRegionLocked(src.size, targetKind, excluded)
@@ -178,6 +188,7 @@ func (h *Heap) allocateEvacuationCopyLocked(src *object, targetKind RegionKind, 
 	h.objects[id] = copyObj
 	r.objects[id] = struct{}{}
 	r.used += copyObj.size
+	h.usedTotal += copyObj.size
 	return copyObj, true
 }
 
@@ -187,11 +198,12 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 		return nil
 	}
 	failed := make(map[RegionID]bool)
+	destSet := make(map[RegionID]bool)
 	for _, r := range h.regions {
 		if !cset[r.id] {
 			continue
 		}
-		for _, id := range r.objectIDs() {
+		for _, id := range r.objectIDsUnsorted() {
 			src, ok := h.objects[id]
 			if !ok {
 				continue
@@ -222,32 +234,29 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 			src.forwardedTo = copyObj.id
 			stats.MovedObjects++
 			stats.EvacuatedBytes += src.size
+			destSet[copyObj.region] = true
 		}
 	}
-
-	// Update every root and every object reference before deleting source
-	// objects. This also handles references from a failed source region.
-	newRoots := make(map[ObjectID]struct{}, len(h.roots))
-	for root := range h.roots {
-		root = h.resolveLocked(root)
-		if _, ok := h.objects[root]; ok {
-			newRoots[root] = struct{}{}
-		}
-	}
-	h.roots = newRoots
-	for _, obj := range h.objects {
-		for i, ref := range obj.refs {
-			if ref != NullObject {
-				obj.refs[i] = h.resolveLocked(ref)
+	if stats.MovedObjects == 0 {
+		// Nothing moved: no reference can be stale. Still rebuild roots
+		// canonically (cheap) and skip the rewrite scan entirely.
+		newRoots := make(map[ObjectID]struct{}, len(h.roots))
+		for root := range h.roots {
+			root = h.resolveLocked(root)
+			if _, ok := h.objects[root]; ok {
+				newRoots[root] = struct{}{}
 			}
 		}
+		h.roots = newRoots
+	} else {
+		h.rewriteForwardedRefsLocked(cset, destSet)
 	}
 
 	for _, r := range h.regions {
 		if !cset[r.id] {
 			continue
 		}
-		for _, id := range r.objectIDs() {
+		for _, id := range r.objectIDsUnsorted() {
 			obj, ok := h.objects[id]
 			if !ok {
 				continue
@@ -256,12 +265,14 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 				delete(h.objects, id)
 				delete(r.objects, id)
 				r.used -= obj.size
+				h.usedTotal -= obj.size
 			}
 		}
 		if failed[r.id] {
 			// A young region that cannot be fully evacuated is retained as old;
 			// the next cycle can retry after reserve space becomes available.
 			if r.kind == RegionEden || r.kind == RegionSurvivor {
+				h.clearActiveLocked(r.id)
 				r.kind = RegionOld
 				for id := range r.objects {
 					h.objects[id].age = h.config.MaxTenuringAge
@@ -270,7 +281,7 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 			r.lastLiveBytes = r.used
 			continue
 		}
-		r.reset()
+		h.freeRegionLocked(r)
 		stats.FreedRegions++
 	}
 
@@ -278,21 +289,99 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 		stats.FailedRegions = append(stats.FailedRegions, id)
 	}
 	sort.Slice(stats.FailedRegions, func(i, j int) bool { return stats.FailedRegions[i] < stats.FailedRegions[j] })
-	h.rebuildRememberedSetsLocked()
+	// RSet rebuild deferred to finishCycleLocked (single rebuild per cycle).
 	if len(failed) > 0 {
 		return ErrEvacuationFailure
 	}
 	return nil
 }
 
-func (h *Heap) finishCycleLocked(stats *Stats) {
-	for _, obj := range h.objects {
-		obj.marked = false
+// rewriteForwardedRefsLocked canonicalizes every reference that may point
+// to a moved object. Roots are always fully rescanned (small set). Heap
+// objects are rewritten only in affected regions:
+//
+//	cset (sources, incl. failed leftovers) + destSet (copy targets) +
+//	RSet-sources pointing into cset.
+//
+// Safety: the RSet at this point is a stale superset for surviving regions
+// (cleanup deletions are deferred to finishCycle; freed regions own no live
+// refs), so the filter can only include extra regions, never miss a true
+// edge. Copies' refs are covered via destSet. When the affected set covers
+// most of the heap, a full scan is cheaper than set overhead and is used.
+func (h *Heap) rewriteForwardedRefsLocked(cset, destSet map[RegionID]bool) {
+	newRoots := make(map[ObjectID]struct{}, len(h.roots))
+	for root := range h.roots {
+		root = h.resolveLocked(root)
+		if _, ok := h.objects[root]; ok {
+			newRoots[root] = struct{}{}
+		}
 	}
+	h.roots = newRoots
+
+	affected := make(map[RegionID]bool, len(cset)+len(destSet)+8)
+	for id := range cset {
+		affected[id] = true
+	}
+	for id := range destSet {
+		affected[id] = true
+	}
+	for id := range cset {
+		if int(id) < 0 || int(id) >= len(h.regions) {
+			continue
+		}
+		for src := range h.regions[id].rememberedFrom {
+			affected[src] = true
+		}
+	}
+	// Cost model: filtered rewrite touches sum(len(objects)) over affected
+	// regions plus one map lookup per slot. Fall back to the full scan when
+	// the filter retains most of the heap.
+	affectedObjects := 0
+	for id := range affected {
+		if int(id) >= 0 && int(id) < len(h.regions) {
+			affectedObjects += len(h.regions[id].objects)
+		}
+	}
+	if affectedObjects*2 >= len(h.objects) {
+		for _, obj := range h.objects {
+			for i, ref := range obj.refs {
+				if ref != NullObject {
+					if resolved := h.resolveLocked(ref); resolved != ref {
+						obj.refs[i] = resolved
+					}
+				}
+			}
+		}
+		return
+	}
+	for id := range affected {
+		if int(id) < 0 || int(id) >= len(h.regions) {
+			continue
+		}
+		r := h.regions[id]
+		for oid := range r.objects {
+			obj, ok := h.objects[oid]
+			if !ok {
+				continue
+			}
+			for i, ref := range obj.refs {
+				if ref != NullObject {
+					if resolved := h.resolveLocked(ref); resolved != ref {
+						obj.refs[i] = resolved
+					}
+				}
+			}
+		}
+	}
+}
+
+func (h *Heap) finishCycleLocked(stats *Stats) {
+	// No per-object mark clearing: the epoch is bumped at the next
+	// beginMarkingLocked, invalidating all marks in O(1).
 	h.marking = false
 	h.markCancelled = false
-	h.satb = nil
-	h.markQueue = nil
+	h.satb = h.satb[:0]
+	h.markQueue = h.markQueue[:0]
 	h.markActive = 0
 	h.state = PhaseIdle
 	for _, r := range h.regions {

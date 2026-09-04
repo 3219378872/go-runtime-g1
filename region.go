@@ -76,6 +76,18 @@ func (r *region) reset() {
 
 // memberIDs returns member IDs without sorting. Use this on hot paths;
 // sort only at API/test boundaries that require determinism.
+// isNormal reports whether the region holds ordinary (non-humongous,
+// non-free) objects and therefore participates in collection sets and free
+// accounting.
+func (k RegionKind) isNormal() bool {
+	return k == RegionEden || k == RegionSurvivor || k == RegionOld
+}
+
+// slack reports the remaining capacity available to normal allocation.
+func (r *region) slack() int64 {
+	return r.capacity - r.used
+}
+
 func (r *region) memberIDs() []ObjectID {
 	ids := make([]ObjectID, 0, len(r.objects))
 	for id := range r.objects {

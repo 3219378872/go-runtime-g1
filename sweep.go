@@ -12,7 +12,7 @@ func (h *Heap) cleanupLocked(stats *Stats) {
 					if ok {
 						stats.ReclaimedBytes += obj.size
 						delete(h.objects, id)
-						h.usedTotal -= obj.size
+						h.alloc.subUsed(obj.size)
 					}
 					stats.FreedRegions += r.span
 					span := r.span
@@ -36,7 +36,7 @@ func (h *Heap) cleanupLocked(stats *Stats) {
 					delete(h.objects, id)
 					delete(r.objects, id)
 					r.used -= obj.size
-					h.usedTotal -= obj.size
+					h.alloc.subUsed(obj.size)
 					continue
 				}
 				live += obj.size

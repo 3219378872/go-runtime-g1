@@ -3,113 +3,43 @@ package g1gc
 import "errors"
 
 func (h *Heap) usedBytesLocked() int64 {
-	return h.usedTotal
+	return h.alloc.usedBytes()
 }
 
 // freeCapacityLocked reports the sum of capacities of free regions in O(1).
 func (h *Heap) freeCapacityLocked() int64 {
-	return h.freeCap
+	return h.alloc.freeBytes()
 }
 
-// pushFreeLocked returns a region to the free stack. Caller must have set
+// pushFreeLocked returns a region to the free pool. Caller must have set
 // r.kind to RegionFree already.
 func (h *Heap) pushFreeLocked(r *region) {
-	idx := int(r.id)
-	if idx < 0 || idx >= len(h.inFree) {
-		return
-	}
-	if h.inFree[idx] {
-		return
-	}
-	h.inFree[idx] = true
-	h.freeStack = append(h.freeStack, r.id)
-	h.freeCap += r.capacity
-	h.clearActiveLocked(r.id)
+	h.alloc.pushFree(r)
 }
 
 // popFreeLocked removes one free region that is not excluded, preferring the
 // top of the stack for cache locality. Returns nil when none is available.
 func (h *Heap) popFreeLocked(excluded map[RegionID]bool) *region {
-	for len(h.freeStack) > 0 {
-		top := h.freeStack[len(h.freeStack)-1]
-		if excluded != nil && excluded[top] {
-			// Excluded top: linear probe from the top. cset is normally
-			// tiny, so this degrades gracefully instead of failing.
-			found := -1
-			for i := len(h.freeStack) - 1; i >= 0; i-- {
-				if !excluded[h.freeStack[i]] {
-					found = i
-					break
-				}
-			}
-			if found < 0 {
-				return nil
-			}
-			top = h.freeStack[found]
-			h.freeStack[found] = h.freeStack[len(h.freeStack)-1]
-			h.freeStack = h.freeStack[:len(h.freeStack)-1]
-			h.inFree[int(top)] = false
-			h.freeCap -= h.regions[top].capacity
-			return h.regions[top]
-		}
-		h.freeStack = h.freeStack[:len(h.freeStack)-1]
-		h.inFree[int(top)] = false
-		h.freeCap -= h.regions[top].capacity
-		return h.regions[top]
-	}
-	return nil
+	return h.alloc.popFree(h.regions, excluded)
 }
 
 func (h *Heap) clearActiveLocked(id RegionID) {
-	for k := range h.active {
-		if h.active[k] == id {
-			h.active[k] = RegionID(-1)
-		}
-	}
+	h.alloc.clearActive(id)
 }
 
 // claimFreeAtLocked removes a specific free region from the free set.
 // Returns false when the region is not free.
 func (h *Heap) claimFreeAtLocked(idx int) bool {
-	if idx < 0 || idx >= len(h.regions) || !h.inFree[idx] {
-		return false
-	}
-	id := RegionID(idx)
-	for i, fid := range h.freeStack {
-		if fid == id {
-			h.freeStack[i] = h.freeStack[len(h.freeStack)-1]
-			h.freeStack = h.freeStack[:len(h.freeStack)-1]
-			break
-		}
-	}
-	h.inFree[idx] = false
-	h.freeCap -= h.regions[idx].capacity
-	return true
+	return h.alloc.claimAt(h.regions, idx)
 }
 
 // takeActiveLocked returns the cached active region for kind when it has room.
 func (h *Heap) takeActiveLocked(kind RegionKind, size int64, excluded map[RegionID]bool) *region {
-	if int(kind) < 0 || int(kind) >= len(h.active) {
-		return nil
-	}
-	id := h.active[kind]
-	if id < 0 || int(id) >= len(h.regions) {
-		return nil
-	}
-	if excluded != nil && excluded[id] {
-		return nil
-	}
-	r := h.regions[id]
-	if r.kind != kind || r.capacity-r.used < size {
-		return nil
-	}
-	return r
+	return h.alloc.takeActive(h.regions, kind, size, excluded)
 }
 
 func (h *Heap) setActiveLocked(kind RegionKind, id RegionID) {
-	if int(kind) >= 0 && int(kind) < len(h.active) {
-		h.active[kind] = id
-	}
+	h.alloc.setActive(kind, id)
 }
 
 // Allocate creates an object with no reference slots. Allocation may trigger
@@ -201,7 +131,7 @@ func (h *Heap) allocateLocked(size int64, refs []ObjectID) (ObjectID, error) {
 		h.objects[id] = obj
 		r.objects[id] = struct{}{}
 		r.used += size
-		h.usedTotal += size
+		h.alloc.addUsed(size)
 		h.applyAllocationBarrierLocked(obj)
 		h.recordAllocRememberedLocked(obj)
 		return id, nil
@@ -234,7 +164,7 @@ func (h *Heap) allocateLocked(size int64, refs []ObjectID) (ObjectID, error) {
 		r.used = r.capacity
 		r.span = 0
 	}
-	h.usedTotal += size
+	h.alloc.addUsed(size)
 	h.applyAllocationBarrierLocked(obj)
 	h.recordAllocRememberedLocked(obj)
 	return id, nil
@@ -263,7 +193,7 @@ func (h *Heap) findNormalRegionLocked(size int64, kind RegionKind, excluded map[
 	// because it is full, excluded, or unset). This is rare; the common
 	// case never reaches here.
 	for _, r := range h.regions {
-		if r.kind == kind && r.capacity-r.used >= size {
+		if r.kind == kind && r.slack() >= size {
 			if excluded != nil && excluded[r.id] {
 				continue
 			}
@@ -317,7 +247,7 @@ func (h *Heap) freeRegionLocked(r *region) {
 
 func (h *Heap) findHumongousSpanLocked(size int64) (int, int) {
 	// Single O(R) pass tracking the current free run instead of the old
-	// O(R^2) nested scan. Respects inFree so it stays consistent with
+	// O(R^2) nested scan. Respects the free pool so it stays consistent with
 	// the free stack.
 	runStart := -1
 	var runCap int64
@@ -345,7 +275,7 @@ func (h *Heap) releaseHumongousLocked(obj *object) {
 	if start < 0 || start+span > len(h.regions) {
 		return
 	}
-	h.usedTotal -= obj.size
+	h.alloc.subUsed(obj.size)
 	for i := 0; i < span; i++ {
 		h.freeRegionLocked(h.regions[start+i])
 	}
@@ -369,6 +299,6 @@ func (h *Heap) deleteObjectLocked(id ObjectID) {
 			r.used = 0
 		}
 	}
-	h.usedTotal -= obj.size
+	h.alloc.subUsed(obj.size)
 	delete(h.objects, id)
 }

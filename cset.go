@@ -18,7 +18,7 @@ func (h *Heap) selectCollectionSetLocked(stats *Stats) map[RegionID]bool {
 	var young []collectionCandidate
 	var old []collectionCandidate
 	for _, r := range h.regions {
-		if r.kind != RegionEden && r.kind != RegionSurvivor && r.kind != RegionOld {
+		if !r.kind.isNormal() {
 			continue
 		}
 		if r.used == 0 {

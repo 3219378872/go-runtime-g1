@@ -2,9 +2,14 @@
 
 ID: E03。覆盖：M01#validate, M02#evacuate-rewrite, S02。
 
-## 单元（`g1gc_test.go:521行`，10 用例）
+## 单元（14 用例，按领域拆分）
 
-`TestG1CycleKeepsReachableGraphAndReclaimsGarbage`、`TestEvacuationUpdatesOldHandlesAndCrossRegionReferences`、`TestRememberedSetRetainsAllCrossRegionEdges`、`TestHumongousSpanIsSweptAndRootedSpanSurvives`、`TestPinnedObjectReportsEvacuationFailureButRemainsLive`、`TestCancelledCycleRestoresIdleState`、`TestPromotionAndIHOPPolicyAcrossCycles`、`TestAllocationFailureTriggersAutomaticCollection`、`TestSATBPreservesPreMutationValueForOneCycle`、`TestPauseBudgetLimitsCollectionSet`。
+- `cycle_test.go`：`TestG1CycleKeepsReachableGraphAndReclaimsGarbage`、`TestCancelledCycleRestoresIdleState`、`TestAllocationFailureTriggersAutomaticCollection`。
+- `evac_test.go`：`TestEvacuationUpdatesOldHandlesAndCrossRegionReferences`、`TestHumongousSpanIsSweptAndRootedSpanSurvives`、`TestPinnedObjectReportsEvacuationFailureButRemainsLive`。
+- `rset_test.go`：`TestRememberedSetRetainsAllCrossRegionEdges` + 纯索引单测 `TestRSetIndexTracksPairTransitions`（`rsetIndex#add/remove/clear` 首零边跳变）。
+- `mark_test.go`：`TestSATBPreservesPreMutationValueForOneCycle`。
+- `policy_test.go`：`TestPromotionAndIHOPPolicyAcrossCycles`、`TestPauseBudgetLimitsCollectionSet`。
+- `pool_test.go`：`TestFreePoolPushPopClaim`（LIFO/排除探测/claim 幂等）、`TestActiveCacheSetClearGet`、`TestAllocatorTakeActiveAndUsed`。
 
 跑：`just test-project` / `just test-race`（结果记 E01）。
 

@@ -16,6 +16,7 @@ ID: M01。覆盖 D01（部分）、S01/S03。证据：E01#test-project, E03#unit
 | 统计 | `stats.go` | 周期统计与深拷贝 | `Stats, cloneStats` |
 | 堆核心 | `heap.go` | 状态组合/New/Close/寻址 | `Heap, New, Close, resolveLocked` |
 | 分配 | `alloc.go` | 分配/空闲栈/active 缓存/记账 | `Allocate/AllocateObject/AllocateWithRefs, findNormalRegionLocked` |
+| 分配池 | `pool.go` | 空闲池/active 缓存/used 记账（可单测） | `freePool#push/pop/claim, activeCache, allocator` |
 | 引用 | `refs.go` | Roots/引用/存活/Pin | `AddRoot, SetReference, Resolve, ObjectInfo, Pin/Unpin` |
 | 记忆集 | `rset.go` | 跨区引用计数索引 | `rsKey, rsAddEdgeForSlotLocked, rebuildRememberedSetsLocked` |
 | 周期编排 | `cycle.go` | `Collect` 五阶段编排/收尾/中断 | `Collect, GC, finishCycleLocked, abortCycle` |
@@ -34,7 +35,7 @@ ID: M01。覆盖 D01（部分）、S01/S03。证据：E01#test-project, E03#unit
 `region#objectIDs/reset` 旧版（统一为原地复用的 `reset`），
 `objectIDsUnsorted` 更名为 `memberIDs`。行为零改动，见符号覆盖审计。
 
-证据：E01 `test-project`，E03 10 用例（`g1gc_test.go`）。
+证据：E01 `test-project`，E03 14 用例（`cycle/evac/rset/mark/policy/pool` 六个测试文件，见 E03）。
 
 ## 迁移来源
 

@@ -23,11 +23,10 @@ func (h *Heap) FreeBytes() int64 {
 func (h *Heap) freeBytesLocked() int64 {
 	var free int64
 	for _, r := range h.regions {
-		switch r.kind {
-		case RegionFree:
+		if r.kind == RegionFree {
 			free += r.capacity
-		case RegionEden, RegionSurvivor, RegionOld:
-			free += r.capacity - r.used
+		} else if r.kind.isNormal() {
+			free += r.slack()
 		}
 	}
 	return free

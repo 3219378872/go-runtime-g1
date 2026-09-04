@@ -5,12 +5,12 @@ import "sort"
 func (h *Heap) allocateEvacuationCopyLocked(src *object, targetKind RegionKind, excluded map[RegionID]bool) (*object, bool) {
 	// Fast path O(1): active region has room → no reserve check needed.
 	// Slow path (active miss, rare): scan same-kind for slack; only when
-	// no same-kind room exists do we consult the O(1) freeCap reserve.
-	// cset never contains free regions, so freeCap needs no exclusion.
+	// no same-kind room exists do we consult the O(1) free-pool reserve.
+	// cset never contains free regions, so the free pool needs no exclusion.
 	if h.takeActiveLocked(targetKind, src.size, excluded) == nil {
 		hasRoom := false
 		for _, r := range h.regions {
-			if r.kind == targetKind && r.capacity-r.used >= src.size {
+			if r.kind == targetKind && r.slack() >= src.size {
 				if excluded != nil && excluded[r.id] {
 					continue
 				}
@@ -20,7 +20,7 @@ func (h *Heap) allocateEvacuationCopyLocked(src *object, targetKind RegionKind, 
 		}
 		if !hasRoom {
 			reserve := h.config.HeapSize * int64(h.config.EvacuationReservePercent) / 100
-			if h.freeCap-reserve < src.size {
+			if h.freeCapacityLocked()-reserve < src.size {
 				return nil, false
 			}
 		}
@@ -50,7 +50,7 @@ func (h *Heap) allocateEvacuationCopyLocked(src *object, targetKind RegionKind, 
 	h.objects[id] = copyObj
 	r.objects[id] = struct{}{}
 	r.used += copyObj.size
-	h.usedTotal += copyObj.size
+	h.alloc.addUsed(copyObj.size)
 	return copyObj, true
 }
 
@@ -127,7 +127,7 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 				delete(h.objects, id)
 				delete(r.objects, id)
 				r.used -= obj.size
-				h.usedTotal -= obj.size
+				h.alloc.subUsed(obj.size)
 			}
 		}
 		if failed[r.id] {

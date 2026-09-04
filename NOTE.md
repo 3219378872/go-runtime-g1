@@ -9,6 +9,16 @@ entry point for format checks, runtime/SSA gates, project tests, race tests,
 and matched official-versus-candidate benchmarks. The benchmark comparator
 is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
 
+## Iteration 2026-09-04c: sim 内部边界（allocator/rsetIndex 抽取+测试拆分）
+
+动机：`Heap` 神对象直管 5 个分配记账字段 + `rsRef` 原始 map，RSet 计数逻辑只能经 `Heap` 间接测试；`g1gc_test.go`（521 行）十个用例跨 5 个领域。继续 09-04b 的模块化方向。
+
+改动：新 `pool.go`（`freePool` 空闲栈/成员位图/O(1) 储备、`activeCache`、`allocator` 组合 + `used` 记账；`Heap` 只留 `alloc allocator`，原 `*Locked` 方法名不变、体内委托）；`rset.go` 新增纯 `rsetIndex#add/remove/clear`（首零边跳变返回值，`Heap` 方法只做 `rememberedFrom/To` 翻译，`Heap.rsRef` 改为 `rset rsetIndex`）；`region.go` 新增 `RegionKind#isNormal`、`region#slack` 并用于 `policy.go#freeBytesLocked`、`cset.go` 选择、`alloc.go`/`evac.go` 余量判断。测试按领域拆为 `sim/cycle/evac/rset/mark/policy_test.go`（10 用例原样搬运），新增 `pool_test.go` + `TestRSetIndexTracksPairTransitions`（14 用例）。
+
+门：`go test .`、`go test -race .` 通过；`./bench/check-trace.sh` 零 WARN（同步 `M01` pool 行 + E03 14 用例、`S01` 测试布局、`justfile:project_go_files` 追新文件）；sim 交替 bench（条件同 09-04b，main/task 各 7 次）17/18 行中位数 `<=1.05`，唯一越界 `BenchmarkAllocate4K ns/op` 首轮 1.061。
+
+越界裁决（同 session 内完成）：轮次比 1.068/0.979/1.096/1.006/1.049/1.097/1.010（task-first 轮次亦有 0.979，单轮极差 ±9%，main 自身跨轮 447~516ns）；按规则反转起手同参数复裁 7 轮得 1.012/0.951/1.043/0.983/0.907/0.973/1.071，中位数 0.983，两轮合并中位数 1.011。`B/op`/`allocs/op` 21 对运行全部恒等；`-gcflags=-m` 证实委托链（`takeActiveLocked/allocator.takeActive/activeCache.get/region.slack/setActive`）全部可内联，热路径无结构性新增开销。结论：无可裁决回归，首轮 1.061 为 VM 噪声（先例见 09-03c gate-off 对照 +4.9% 判噪声；本机 preflight 已告警 VM 漂移，sub-µs bench 实测极差更大）。
+
 ## Iteration 2026-09-04b: sim 模块化重构（7 文件 → 19 文件，纯搬运）
 
 动机：根模拟包 `types.go`（727 行）/`heap.go`（693 行）是 god 文件（身份+配置+堆状态+周期编排混装；分配+Roots/引用+RSet+快照混装），6 个无调用者兼容别名与 3 处死代码增加耦合。接 NOTE 2026-09-04 fork 拆分思路，把 sim 侧也按单一职责拆分，为后续 D05 纵深留干净插入点。只搬代码不改行为。

@@ -12,7 +12,7 @@ ID: S01。上游：I01, I02。下游：D01。实现：M01#collect, M02#cycle。�
 ## 不变式（由 validate.go + NOTE 迁移）
 
 - `Validate() error`（`validate.go`）守 Free/Humongous-span/used-capacity 一致性。
-- 模拟包 promotion/IHOP/SATB/pause-budget 行为由 `g1gc_test.go` 10 用例锁定（`TestPromotionAndIHOPPolicyAcrossCycles`、`TestSATBPreservesPreMutationValueForOneCycle`、`TestPauseBudgetLimitsCollectionSet` 等），结果记 E03。
+- 模拟包 promotion/IHOP/SATB/pause-budget 行为由 14 用例锁定（`cycle/evac/rset/mark/policy/pool` 测试文件，`TestPromotionAndIHOPPolicyAcrossCycles`、`TestSATBPreservesPreMutationValueForOneCycle`、`TestPauseBudgetLimitsCollectionSet` 等），结果记 E03。
 
 ## 迁移来源
 

@@ -9,12 +9,11 @@ import (
 // protected by mu. world permits mutators during concurrent marking and blocks
 // them at the stop-the-world phases.
 //
-// Allocation fast-path state (all protected by mu):
-//   - freeStack/inFree track exactly the set of RegionFree regions.
-//   - active caches one non-full region per normal kind (Eden/Survivor/Old)
-//     so repeated allocation hits O(1) without scanning h.regions.
-//   - usedTotal is the sum of live object sizes (O(1) UsedBytes).
-//   - freeCap is the sum of capacities of free regions (O(1) reserve check).
+// Allocation fast-path state (all protected by mu, see pool.go): the free
+// pool tracks exactly the set of RegionFree regions, the active cache keeps
+// one non-full region per normal kind so repeated allocation hits O(1)
+// without scanning h.regions, and used is the sum of live object sizes for
+// O(1) UsedBytes.
 type Heap struct {
 	mu      sync.Mutex
 	world   sync.RWMutex
@@ -40,17 +39,11 @@ type Heap struct {
 	markCancelled bool
 	markEpoch     uint32
 
-	// Allocation fast path: see alloc.go.
-	freeStack []RegionID
-	inFree    []bool
-	active    [6]RegionID
-	usedTotal int64
-	freeCap   int64
-	// rsRef counts cross-region reference slots per (src,dst) pair so
-	// mutator writes maintain exact remembered sets in O(1) without
-	// rescanning the source region. STW paths leave it stale and
+	// Allocation fast path: see alloc.go and pool.go.
+	alloc allocator
+	// Remembered-set edge counts: see rset.go. STW paths leave it stale and
 	// finishCycle rebuilds it once.
-	rsRef map[uint64]int
+	rset rsetIndex
 
 	lastStats Stats
 }
@@ -70,19 +63,15 @@ func New(cfg Config) (*Heap, error) {
 		return nil, ErrInvalidConfig
 	}
 	h := &Heap{
-		config:    cfg,
-		regions:   make([]*region, count),
-		objects:   make(map[ObjectID]*object),
-		forward:   make(map[ObjectID]ObjectID),
-		roots:     make(map[ObjectID]struct{}),
-		nextID:    1,
-		state:     PhaseIdle,
-		freeStack: make([]RegionID, 0, count),
-		inFree:    make([]bool, count),
-		rsRef:     make(map[uint64]int),
-	}
-	for i := range h.active {
-		h.active[i] = RegionID(-1)
+		config:  cfg,
+		regions: make([]*region, count),
+		objects: make(map[ObjectID]*object),
+		forward: make(map[ObjectID]ObjectID),
+		roots:   make(map[ObjectID]struct{}),
+		nextID:  1,
+		state:   PhaseIdle,
+		alloc:   newAllocator(count),
+		rset:    newRSetIndex(),
 	}
 	for i := range h.regions {
 		capacity := cfg.RegionSize
@@ -97,9 +86,7 @@ func New(cfg Config) (*Heap, error) {
 			rememberedFrom: make(map[RegionID]struct{}),
 			rememberedTo:   make(map[RegionID]struct{}),
 		}
-		h.freeStack = append(h.freeStack, RegionID(i))
-		h.inFree[i] = true
-		h.freeCap += capacity
+		h.alloc.pushFree(h.regions[i])
 	}
 	h.markCond = sync.NewCond(&h.mu)
 	return h, nil
@@ -118,20 +105,11 @@ func (h *Heap) Close() {
 	for _, r := range h.regions {
 		r.reset()
 	}
-	h.freeStack = h.freeStack[:0]
-	h.freeCap = 0
-	for i, r := range h.regions {
-		h.freeStack = append(h.freeStack, r.id)
-		h.inFree[i] = true
-		h.freeCap += r.capacity
+	h.alloc.reset()
+	for _, r := range h.regions {
+		h.alloc.pushFree(r)
 	}
-	for i := range h.active {
-		h.active[i] = RegionID(-1)
-	}
-	h.usedTotal = 0
-	for k := range h.rsRef {
-		delete(h.rsRef, k)
-	}
+	h.rset.clear()
 	h.mu.Unlock()
 	h.world.Unlock()
 }

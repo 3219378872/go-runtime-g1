@@ -36,6 +36,19 @@ func (h *Heap) RemoveRoot(id ObjectID) {
 	delete(h.roots, id)
 }
 
+// canonicalizeRootsLocked resolves every root through the forwarding table
+// and drops handles to dead objects. Callers must hold mu.
+func (h *Heap) canonicalizeRootsLocked() {
+	newRoots := make(map[ObjectID]struct{}, len(h.roots))
+	for root := range h.roots {
+		root = h.resolveLocked(root)
+		if _, ok := h.objects[root]; ok {
+			newRoots[root] = struct{}{}
+		}
+	}
+	h.roots = newRoots
+}
+
 // Roots returns the current canonical root handles.
 func (h *Heap) Roots() []ObjectID {
 	h.world.RLock()

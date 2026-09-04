@@ -17,7 +17,7 @@ ID: M01。覆盖 D01（部分）、S01/S03。证据：E01#test-project, E03#unit
 | 堆核心 | `heap.go` | 状态组合/New/Close/寻址 | `Heap, New, Close, resolveLocked` |
 | 分配 | `alloc.go` | 分配/空闲栈/active 缓存/记账 | `Allocate/AllocateObject/AllocateWithRefs, findNormalRegionLocked` |
 | 分配池 | `pool.go` | 空闲池/active 缓存/used 记账（可单测） | `freePool#push/pop/claim, activeCache, allocator` |
-| 引用 | `refs.go` | Roots/引用/存活/Pin | `AddRoot, SetReference, Resolve, ObjectInfo, Pin/Unpin` |
+| 引用 | `refs.go` | Roots/引用/存活/Pin | `AddRoot, SetReference, Resolve, ObjectInfo, Pin/Unpin, canonicalizeRootsLocked` |
 | 记忆集 | `rset.go` | 跨区引用计数索引 | `rsKey, rsAddEdgeForSlotLocked, rebuildRememberedSetsLocked` |
 | 周期编排 | `cycle.go` | `Collect` 五阶段编排/STW 门/收尾/中断 | `Collect, GC, stw, finishCycleLocked, abortCycle` |
 | 标记状态机 | `marker.go` | epoch/队列/SATB/取消（可单测，不加锁） | `marker#begin/abort/finish/mark/push/popBatch` |

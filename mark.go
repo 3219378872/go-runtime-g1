@@ -8,16 +8,10 @@ import (
 
 func (h *Heap) beginMarkingLocked() {
 	h.mark.begin(h.objects)
-	canonicalRoots := make(map[ObjectID]struct{}, len(h.roots))
+	h.canonicalizeRootsLocked()
 	for root := range h.roots {
-		root = h.resolveLocked(root)
-		if _, ok := h.objects[root]; !ok {
-			continue
-		}
-		canonicalRoots[root] = struct{}{}
 		h.markObjectLocked(root)
 	}
-	h.roots = canonicalRoots
 }
 
 // markObjectLocked is the shared mark primitive used by root scanning, the

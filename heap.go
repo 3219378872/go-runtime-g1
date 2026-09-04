@@ -129,7 +129,6 @@ func (h *Heap) resolveLocked(id ObjectID) ObjectID {
 	// resolves of old handles stay O(1) amortized across cycles.
 	// Bounded to avoid hanging on a corrupted cycle.
 	const maxChain = 64
-	orig := id
 	var path []ObjectID
 	for steps := 0; steps < maxChain; steps++ {
 		next, ok := h.forward[id]
@@ -152,7 +151,6 @@ func (h *Heap) resolveLocked(id ObjectID) ObjectID {
 			return id
 		}
 	}
-	_ = orig
 	return NullObject
 }
 

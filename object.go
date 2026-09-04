@@ -1,16 +1,15 @@
 package g1gc
 
 type object struct {
-	id          ObjectID
-	size        int64
-	refs        []ObjectID
-	region      RegionID
-	age         uint8
-	markEpoch   uint32
-	pinned      bool
-	forwardedTo ObjectID
-	humongous   bool
-	span        int
+	id        ObjectID
+	size      int64
+	refs      []ObjectID
+	region    RegionID
+	age       uint8
+	markEpoch uint32
+	pinned    bool
+	humongous bool
+	span      int
 }
 
 // ObjectInfo is a read-only description of a currently live object.

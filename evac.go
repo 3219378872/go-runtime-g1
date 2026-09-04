@@ -93,7 +93,6 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 				continue
 			}
 			h.forward[id] = copyObj.id
-			src.forwardedTo = copyObj.id
 			stats.MovedObjects++
 			stats.EvacuatedBytes += src.size
 			destSet[copyObj.region] = true
@@ -102,14 +101,7 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 	if stats.MovedObjects == 0 {
 		// Nothing moved: no reference can be stale. Still rebuild roots
 		// canonically (cheap) and skip the rewrite scan entirely.
-		newRoots := make(map[ObjectID]struct{}, len(h.roots))
-		for root := range h.roots {
-			root = h.resolveLocked(root)
-			if _, ok := h.objects[root]; ok {
-				newRoots[root] = struct{}{}
-			}
-		}
-		h.roots = newRoots
+		h.canonicalizeRootsLocked()
 	} else {
 		h.rewriteForwardedRefsLocked(cset, destSet)
 	}
@@ -171,14 +163,7 @@ func (h *Heap) evacuateLocked(stats *Stats) error {
 // edge. Copies' refs are covered via destSet. When the affected set covers
 // most of the heap, a full scan is cheaper than set overhead and is used.
 func (h *Heap) rewriteForwardedRefsLocked(cset, destSet map[RegionID]bool) {
-	newRoots := make(map[ObjectID]struct{}, len(h.roots))
-	for root := range h.roots {
-		root = h.resolveLocked(root)
-		if _, ok := h.objects[root]; ok {
-			newRoots[root] = struct{}{}
-		}
-	}
-	h.roots = newRoots
+	h.canonicalizeRootsLocked()
 
 	affected := make(map[RegionID]bool, len(cset)+len(destSet)+8)
 	for id := range cset {

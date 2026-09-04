@@ -9,6 +9,19 @@ entry point for format checks, runtime/SSA gates, project tests, race tests,
 and matched official-versus-candidate benchmarks. The benchmark comparator
 is now official go1.27.0 (`toolchain/official-go-1270/`, gitignored).
 
+## Iteration 2026-09-04: fork 纯搬运拆分（2 文件 → 9 文件）
+
+动机：`g1gc.go`（1256 行）/`g1gc_evacuate.go`（1181 行）职责交织，D05 后续（grow-time 取页、sweep 侧路由）无干净插入点。只搬代码不改逻辑。
+
+拆分（`g1gc.go` 5 func 留类型/全局表+CSet/Trace；`g1gc_evacuate.go` 0 func 留常量/全局表）：
+`g1gc_cycle.go`（5，周期开关）、`g1gc_inbound.go`（12，inbound+`g1gcDrainPendingWBSlots` 跨文件归位）、`g1gc_account.go`（16，会计）、`g1gc_alloc_rank.go`（3，D05）、`g1gc_evac_select.go`（8）、`g1gc_evac_copy.go`（9）、`g1gc_evac_rewrite.go`（14）。72 func 符号零增减；行级多重集 diff 仅多 12 行（新文件头注释+1 import）；`//go:nosplit` 全部紧贴原函数（首轮误粘已回滚重切）。
+
+门（全绿）：`check-format`、`build-toolchain`（`GOROOT_BOOTSTRAP=toolchain/go-g1-1266-src`）、`test-runtime`、`test-ssa`、`test-project`、`test-race`、`g1gc-demo`、`stress.sh` 9/9 clean、`bench-smoke` 正常。`justfile:fork_go_files` 追 7 新文件；`M02` 改按 `文件#func` 锚定。
+
+### Next session
+
+- D05 纵深（grow/sweep 侧）在新文件上开口；sim API 去重仍 defer。
+
 ## Iteration 2026-09-03c: same-session old-vs-new A/B — feature neutral
 
 Built the pre-change tree separately (`/tmp/opencode/ab/oldroot`,

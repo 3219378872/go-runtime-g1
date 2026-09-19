@@ -896,3 +896,15 @@ pointer64, LIVE_ROOTS=131072, GOMAXPROCS=2, CPU_LIST=0,2):
 
 Generated toolchain output and benchmark history are intentionally excluded
 from Git. Recreate them with `just build-toolchain` and the benchmark recipes.
+
+## Iteration 2026-09-19: documentation drift reconciliation
+
+源码核对基线：`be8f113a`（go1.27.0 fork）。本次只修正文档，未改 Go 源码、benchmark 脚本或 `justfile`。本节按追加约定置于文件末尾，以上历史日志保持原文。
+
+修正当前源码地图：根模拟器的 allocator/rsetIndex/marker 与锁边界、21 个单元用例、fork 的 9 个 G1 核心文件和 compiler/runtime 接入点；“17 + 2”仅保留为迁移时清单。规格/设计对齐 1 MiB region、65,536 个 projected live objects 上限、64 MiB reclaim tagging 目标、窗口 allocate-black 不计入 region live、窗口重试仍受 32-cycle 间隔以及并发 Collect 串行化等当前行为。
+
+修正知识链：补 D05 目录与覆盖，追溯矩阵改为可解析的链接/显式锚点，源码按符号、历史按日期/章节定位。历史 benchmark、stress、宿主噪声与旧 bootstrap workaround 标明适用迭代；上方旧「Verified」「Known Limits」不作为当前提交的验证状态。当前实现以 S/D/M 文档及源码为准，历史数值保留在对应档案中。
+
+修正使用说明：根测试限定项目包；benchmark 使用当前 candidate 路径，注明 official 回退行为、main/task 与 official/candidate 的 ratio 含义，以及脚本默认值和标准 15s/n=7 的区别。当前命令仍以 `justfile` 和脚本为准。
+
+文档门通过：`bench/check-trace.sh`、`git diff --check`、recipe dry-run、shell 示例语法、本地链接/锚点与源码符号核对；完整范围见 E01。Runtime 构建/测试、stress 和性能 A/B 为 N/A（纯 Markdown 改动，无执行路径变化），没有新增运行时或性能结论。

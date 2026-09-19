@@ -2,8 +2,15 @@
 
 > 知识库入口：结构化知识见 `docs/`（意图/规格/设计/实现/证据五层，对照见 `docs/README.md#迁移对照`）。本文件保留项目入口与命令说明。
 
-This repository contains a standalone object-heap runtime that implements the
-main algorithms used by a JVM G1 collector:
+This repository contains three related parts:
+
+- the root `g1gc` package, a standalone object-heap simulator;
+- `toolchain/go-g1-1270-src/`, the current real Go runtime fork based on
+  go1.27.0; older fork trees are retained for rebase reference;
+- `bench/`, the runtime workload, paired performance harness, and correctness
+  stress tools. `bench_sim_test.go` benchmarks the separate root simulator.
+
+The simulator implements the main algorithms used by a JVM G1 collector:
 
 - fixed-size heap regions with Eden, Survivor, Old, and humongous regions;
 - root discovery through object handles;
@@ -23,9 +30,12 @@ object heap and its object graph.
 Run the tests with:
 
 ```text
-go test ./...
-go test -race ./...
+go test . ./bench/... ./cmd/...
+go test -race .
 ```
+
+These package patterns exclude the embedded Go source trees and their compiler
+test fixtures. Use the `just` gates below for the real runtime fork.
 
 Run the real Go runtime fork checks with `just`:
 
@@ -48,9 +58,9 @@ Use the prepared benchmark commands for matched comparisons:
 just bench-smoke
 DURATION=10s GOMAXPROCS_VALUE=2 CPU_LIST=0,2 SCENARIO=pointer64 just bench
 
-REPEATS=5 GOMAXPROCS_VALUE=2 CPU_LIST=0,2 DURATION=3s just bench-g1gcset
-REPEATS=5 GOMAXPROCS_VALUE=2 CPU_LIST=0,2 DURATION=3s just bench-g1evac
-REPEATS=5 GOMAXPROCS_VALUE=2 CPU_LIST=0,2 DURATION=3s just bench-trace
+REPEATS=7 GOMAXPROCS_VALUE=2 CPU_LIST=0,2 DURATION=15s just bench-g1gcset
+REPEATS=7 GOMAXPROCS_VALUE=2 CPU_LIST=0,2 DURATION=15s just bench-g1evac
+REPEATS=7 GOMAXPROCS_VALUE=2 CPU_LIST=0,2 DURATION=15s just bench-trace
 LABEL=collection-set just bench-summary
 ```
 
@@ -59,6 +69,9 @@ corresponding diagnostic `GODEBUG` defaults and still accept an explicit
 `GODEBUG_VALUE` or `LABEL`. All workload variables are passed through to the
 existing scripts. Single-run results are useful for smoke checks; use a
 repeated command and inspect its median and spread for performance comparisons.
+For task regression gates, follow `AGENTS.md`: compare fresh main and task forks
+with A=main and B=task. The default official/candidate comparison answers a
+different question: how the fork compares with upstream Go.
 
 Run the small workload demo with:
 
@@ -82,10 +95,12 @@ Hard-fails on offline benchmark cores or hypervisor steal above budget
 governors, runqueue pressure, and virtualization.
 
 2. On bare metal, isolate the benchmark pair from scheduler noise: boot
-with `isolcpus=nohz_full=<cores> rcu_nocbs=<cores>`, set the cpufreq
+with `isolcpus=<cores> nohz_full=<cores> rcu_nocbs=<cores>`, set the cpufreq
 governor to `performance`, and keep IRQs (irqbalance) off those cores.
-On VMs/WSL none of this is available; expect ±3-5% session-to-session
-throughput drift and treat sub-3% effects as unmeasurable there.
+VM/WSL guests may not control the underlying host's isolation or frequency.
+The historical runs in `NOTE.md` (2026-08-25c and 2026-09-03c) encountered
+3-5% drift; those observations do not establish a noise bound for a new host.
+Passing preflight alone does not demonstrate that small effects are measurable.
 
 3. Produce the standing reference matrix under the measurement protocol
 (15s runs, n=7 alternating, in-tree official go1.27.0):

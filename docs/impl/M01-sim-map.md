@@ -1,9 +1,13 @@
 # M01 模拟包实现索引
 
-ID: M01。覆盖 D01（部分）、S01/S03。证据：E01#test-project, E03#unit。
+ID: M01。覆盖 D01（部分）、S01/S03。证据：[E01 项目测试](../evidence/E01-gates.md#test-project)、[E03 单元](../evidence/E03-correctness-stress.md#unit)。
 
 根模拟包按单一职责拆分为一 concern 一文件（`doc.go` 为模块地图与锁纪律）。
-锚点一律按 `文件#func` 引用，行号漂移只告警。
+源码位置按 `文件#符号` 引用；下面的章节锚点用于跨层追溯。
+
+<a id="sim"></a>
+
+## 模块地图
 
 | 模块 | 文件 | 职责 | 关键符号 |
 |---|---|---|---|
@@ -39,6 +43,30 @@ ID: M01。覆盖 D01（部分）、S01/S03。证据：E01#test-project, E03#unit
 
 证据：E01 `test-project`，E03 21 用例（`cycle/evac/rset/mark/marker/policy/pool` 七个测试文件，见 E03）。
 
+<a id="collect"></a>
+
+## 周期编排
+
+`cycle.go#Collect/GC` 编排五阶段，`cycleMu` 串行化整个调用；`stw` 为 remark/cleanup/evacuation 统一获取 `world` 与 `mu`。`marker.go` 不自行加锁，`mark.go` 负责 worker、条件变量和对象寻址。
+
+证据：E03 的 `cycle_test.go`、`mark_test.go`、`marker_test.go`；执行门见 E01。
+
+<a id="collect-select"></a>
+
+## 集合选择与疏散
+
+`cset.go#selectCollectionSetLocked/pauseEstimate` 按暂停预估选择区域；`evac.go#evacuateLocked` 编排复制、引用重写与源区域回收，失败区域保留 live 对象。
+
+证据：E03 的 `policy_test.go`、`evac_test.go`；性能入口为 `bench_sim_test.go`。
+
+<a id="validate"></a>
+
+## 不变式校验
+
+`validate.go#Validate` 检查对象、转发链、区域与分配记账一致性。
+
+证据：E03 的周期/疏散等用例通过 `Validate` 检查结果。
+
 ## 迁移来源
 
-- 本页由根 `*.go` 导出符号盘点 + `README.md:3-19` 算法清单迁移；一致性修复（`bench/run.sh` CANDIDATE_ROOT、`types.go AfterUsedBytes`、`heap.go RegionCount` 锁、`go.mod` go 1.26）见 `NOTE.md:629-640`。
+- 当前地图取自根 `*.go` 与 `doc.go`。一致性修复历史见 `NOTE.md` 2026-08-21；当前模块拆分与内部组件抽取见 2026-09-04b/c/d。旧记录中的 `types.go` 内容现已分散到模型、统计和配置文件。

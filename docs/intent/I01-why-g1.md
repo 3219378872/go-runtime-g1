@@ -6,17 +6,17 @@ ID: I01。上层：无。下游：S01, S02, S03。
 
 - 在 Go 上验证 JVM G1 主算法：固定 Region、SATB、RSet、并发标记、疏散复制。
 - 真实 fork 上实现暂停可预测：`stw_max` / `stw_p99` 优于上游，吞吐至少 parity。
-- 来源：`README.md:3-13`。
+- 来源：`README.md` 算法清单、I03 成功标尺。
 
 ## 非目标
 
-- 不替换 Go 编译器/运行时收集器；模拟包用 `g1gc.ObjectID` 句柄（`README.md:15-19`）。
-- 模拟包不做可扩展性优化，部分操作 O(heap)（`NOTE.md:702-703` Known Limits）。
-- fork 未达稳定性能 parity 前，不宣称超越上游；吞吐 parity 或更好仅在无 GODEBUG 默认路径成立（`NOTE.md:696-701`）。
+- 根模拟包不替换宿主 Go 收集器，使用 `g1gc.ObjectID` 句柄管理独立对象图；真实 fork 则直接改动 Go Runtime 与编译器，边界见 I02。
+- 模拟包允许部分操作 O(heap)，首要职责是算法验证与行为回归；分配缓存、独立标记状态机等内部优化见 M01 和 `NOTE.md` 2026-09-04b/c/d。
+- fork 未达稳定性能 parity 前，不宣称超越上游。默认路径或单个场景的历史结果不能外推为所有配置的当前结论，测量协议见 S04。
 
 ## 迁移来源
 
-- 本节由 `README.md:3-19`（算法清单+句柄约束）与 `NOTE.md:694-706`（Known Limits）迁移合并，原文件保留为档案，权威解读以本层为准。
+- 本节由 `README.md` 算法清单/句柄约束与 `NOTE.md`「Known Limits」迁移合并；历史限制和结果需结合后续迭代与当前源码解读。
 
 ## 成功标尺
 
